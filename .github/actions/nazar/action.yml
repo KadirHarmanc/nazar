@@ -1,0 +1,130 @@
+name: 'Nazar - Otonom Test Araci'
+description: 'Projeyi tarar, guvenlik + kalite testleri calistirir, PR comment olarak raporlar'
+author: 'Nazar'
+
+inputs:
+  path:
+    description: 'Proje dizini'
+    required: false
+    default: '.'
+  github-token:
+    description: 'GitHub token (PR comment icin)'
+    required: false
+    default: ${{ github.token }}
+  fail-on-critical:
+    description: 'Kritik sorun varsa CI fail etsin mi'
+    required: false
+    default: 'true'
+  sarif-upload:
+    description: 'SARIF sonuclarini Code Scanning e yukle'
+    required: false
+    default: 'false'
+  report-format:
+    description: 'Rapor formati (pr-comment, json, sarif, html)'
+    required: false
+    default: 'pr-comment'
+
+outputs:
+  grade:
+    description: 'Proje notu (A+, A, B, C, D)'
+    value: ${{ steps.nazar.outputs.grade }}
+  passed:
+    description: 'Gecen test sayisi'
+    value: ${{ steps.nazar.outputs.passed }}
+  failed:
+    description: 'Kalan test sayisi'
+    value: ${{ steps.nazar.outputs.failed }}
+  status:
+    description: 'success veya failure'
+    value: ${{ steps.nazar.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Nazar
+      shell: bash
+      run: |
+        pip install --quiet nazar || pip install --quiet -e ${{ github.action_path }}/../../..
+
+    - name: Run Nazar
+      id: nazar
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        NAZAR_CI: 'true'
+      run: |
+        cd ${{ inputs.path }}
+
+        # JSON cikti ile calistir
+        RESULT=$(nazar auto --json . 2>/dev/null || true)
+
+        # Python ile sonuclari isle
+        python3 << 'PYEOF'
+        import json, os, sys
+        sys.path.insert(0, '${{ github.action_path }}/../../..')
+
+        from nazar.scanner.project_scanner import ProjectScanner
+        from nazar.planner.test_planner import TestPlanner
+        from nazar.runners.orchestrator import TestOrchestrator
+        from nazar.integrations.github_pr import GitHubPRReporter
+
+        # Tara, planla, calistir
+        scanner = ProjectScanner('${{ inputs.path }}')
+        scan_result = scanner.scan()
+        planner = TestPlanner(scan_result)
+        test_plan = planner.create_plan()
+        plan_dict = test_plan.to_dict()
+
+        orchestrator = TestOrchestrator('${{ inputs.path }}', plan_dict)
+        results = orchestrator.run_all()
+
+        passed = sum(1 for r in results if r['passed'])
+        failed = len(results) - passed
+        rate = (passed / len(results) * 100) if results else 0
+
+        grade = 'A+' if rate >= 90 else 'A' if rate >= 80 else 'B' if rate >= 70 else 'C' if rate >= 50 else 'D'
+
+        reporter = GitHubPRReporter()
+        status = reporter.get_check_status(results)
+
+        # PR Comment
+        report_format = '${{ inputs.report-format }}'
+        if report_format == 'pr-comment' and reporter.pr_number:
+            reporter.post_comment(results, plan_dict)
+            print(f'PR #{reporter.pr_number} comment gonderildi')
+
+        # SARIF
+        if '${{ inputs.sarif-upload }}' == 'true':
+            sarif = reporter.generate_sarif(results)
+            with open('nazar-results.sarif', 'w') as f:
+                f.write(sarif)
+            print('SARIF: nazar-results.sarif')
+
+        # Outputs
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'grade={grade}\n')
+            f.write(f'passed={passed}\n')
+            f.write(f'failed={failed}\n')
+            f.write(f'status={status}\n')
+
+        print(f'Nazar: {grade} ({rate:.0f}%) - {passed}/{len(results)}')
+        PYEOF
+
+    - name: Upload SARIF
+      if: inputs.sarif-upload == 'true' && hashFiles('nazar-results.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: nazar-results.sarif
+        category: nazar
+
+    - name: Check Status
+      if: inputs.fail-on-critical == 'true' && steps.nazar.outputs.status == 'failure'
+      shell: bash
+      run: |
+        echo "::error::Nazar kritik sorunlar tespit etti! Not: ${{ steps.nazar.outputs.grade }}"
+        exit 1

@@ -1,0 +1,912 @@
+"""Nazar Interactive Shell - Claude Code benzeri interaktif terminal arayuzu."""
+import os
+import sys
+import re
+import time
+from pathlib import Path
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.syntax import Syntax
+from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich import box
+
+
+BANNER = """[bold cyan]
+  ███╗   ██╗ █████╗ ███████╗ █████╗ ██████╗
+  ████╗  ██║██╔══██╗╚══███╔╝██╔══██╗██╔══██╗
+  ██╔██╗ ██║███████║  ███╔╝ ███████║██████╔╝
+  ██║╚██╗██║██╔══██║ ███╔╝  ██╔══██║██╔══██╗
+  ██║ ╚████║██║  ██║███████╗██║  ██║██║  ██║
+  ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝[/bold cyan]
+  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]
+"""
+
+HELP_TEXT = """
+[bold]BASLANGIC:[/bold]
+  Proje yolunu yazin veya Desktop'taki klasor adini girin:
+  [green]nazar> ~/Desktop/MyProject[/green]
+  [green]nazar> MyProject[/green]  [dim](Desktop'ta arar)[/dim]
+
+[bold]KOMUTLAR:[/bold] [dim](/ opsiyonel - scan veya /scan ayni sey)[/dim]
+  [cyan]scan <yol>[/cyan]    [dim]|[/dim] [cyan]tara[/cyan]        Projeyi tara
+  [cyan]report[/cyan]        [dim]|[/dim] [cyan]rapor[/cyan]       Basarisiz testler (report failed, report security)
+  [cyan]detail <no>[/cyan]   [dim]|[/dim] [cyan]d3[/cyan]          Testin detayi + sorunlu kod
+  [cyan]guide <no>[/cyan]    [dim]|[/dim] [cyan]g2[/cyan]          Adim adim duzeltme rehberi
+  [cyan]export html[/cyan]   [dim]|[/dim] [cyan]e json[/cyan]      HTML/JSON/SARIF cikti
+  [cyan]categories[/cyan]    [dim]|[/dim] [cyan]cat[/cyan]         Kategori listesi
+  [cyan]stats[/cyan]                        Genel istatistikler
+  [cyan]profiles[/cyan]      [dim]|[/dim] [cyan]profiller[/cyan]   Test profilleri
+  [cyan]update[/cyan]        [dim]|[/dim] [cyan]guncelle[/cyan]    Son versiyona guncelle
+  [cyan]clear[/cyan]         [dim]|[/dim] [cyan]temizle[/cyan]     Ekrani temizle
+  [cyan]help[/cyan]          [dim]|[/dim] [cyan]yardim[/cyan]      Bu ekran
+  [cyan]quit[/cyan]          [dim]|[/dim] [cyan]q[/cyan]           Cikis
+
+[bold]IPUCLARI:[/bold]
+  [dim]Tab[/dim]          Otomatik tamamlama
+  [dim]Yukari ok[/dim]    Onceki komutlar
+  [dim]Ctrl+C[/dim]       Iptal
+"""
+
+
+class NazarCompleter(Completer):
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "help", "quit",
+                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "yardim", "cikis", "cat"]
+    FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
+    FORMATS = ["html", "json", "sarif", "junit", "markdown"]
+
+    def __init__(self):
+        self.path_completer = PathCompleter(expanduser=True)
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.strip()
+        word = text.lstrip("/").split(" ", 1)[0].lower()
+        if word in ("report", "rapor", "r") and " " in text:
+            sub = text.split(" ", 1)[1]
+            for f in self.FILTERS:
+                if f.startswith(sub):
+                    yield Completion(f, start_position=-len(sub))
+        elif word in ("export", "e") and " " in text:
+            sub = text.split(" ", 1)[1]
+            for f in self.FORMATS:
+                if f.startswith(sub):
+                    yield Completion(f, start_position=-len(sub))
+        elif not " " in text:
+            clean = text.lstrip("/")
+            for cmd in self.COMMANDS:
+                if cmd.startswith(clean):
+                    yield Completion(cmd, start_position=-len(clean))
+            yield from self.path_completer.get_completions(document, complete_event)
+        else:
+            yield from self.path_completer.get_completions(document, complete_event)
+
+
+def _grade(rate):
+    for min_r, g in [(97,"A+"),(93,"A"),(90,"A-"),(87,"B+"),(83,"B"),(80,"B-"),(77,"C+"),(73,"C"),(70,"C-"),(67,"D+"),(63,"D"),(60,"D-"),(0,"F")]:
+        if rate >= min_r:
+            return g
+    return "F"
+
+
+class NazarShell:
+    def __init__(self):
+        self.console = Console()
+        history_dir = Path.home() / ".nazar"
+        history_dir.mkdir(exist_ok=True)
+        self.session = PromptSession(
+            history=FileHistory(str(history_dir / "history")),
+            completer=NazarCompleter(),
+        )
+        self.results = None
+        self.plan_data = None
+        self.project_path = None
+
+    def _show_header(self, welcome=False):
+        """Banner goster (sadece acilista veya /clear'da)."""
+        self.console.clear()
+        from nazar import __version__
+        width = self.console.width or 80
+
+        if width >= 60:
+            self.console.print(BANNER, end="")
+        else:
+            self.console.print("[bold cyan]  NAZAR[/bold cyan]")
+            self.console.print(f"  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]")
+
+        if width >= 80:
+            self.console.print(f"  [dim]v{__version__}[/dim]  |  [bold]197+[/bold] kontrol  |  [bold]21[/bold] kategori  |  [bold]15+[/bold] framework  |  [bold]87[/bold] rehber")
+        else:
+            self.console.print(f"  [dim]v{__version__}[/dim] | [bold]197+[/bold] kontrol | [bold]21[/bold] kategori")
+
+        if welcome:
+            self._check_update_on_start()
+            self.console.print()
+            self.console.print("  [green]Taramak istediginiz projenin yolunu yazin:[/green]")
+            self.console.print("  [dim]Ornek: ~/Desktop/MyProject | /help[/dim]")
+
+    def run(self):
+        self._show_header(welcome=True)
+        while True:
+            try:
+                text = self.session.prompt(HTML('<style fg="#6366f1"><b>nazar</b></style><style fg="#475569">&gt; </style>'))
+                text = text.strip()
+                if not text:
+                    continue
+                self._handle(text)
+            except KeyboardInterrupt:
+                self.console.print("\n[dim]Iptal edildi.[/dim]")
+            except EOFError:
+                self.console.print("\n[dim]Gorusuruz![/dim]")
+                break
+
+    def _handle(self, text):
+        parts = text.strip().split(None, 1)
+        word = parts[0].lower().lstrip("/")
+        arg = parts[1] if len(parts) > 1 else ""
+
+        # Numara ile baslayan kisayollar: d3, g2, d 5
+        if len(word) > 1 and word[0] in ("d", "g") and word[1:].isdigit():
+            arg = word[1:]
+            word = word[0]
+
+        # Komut eslemesi - / olsun olmasin ayni calisiyor
+        cmds = {
+            "scan": lambda: self._scan(arg), "tara": lambda: self._scan(arg), "s": lambda: self._scan(arg),
+            "report": lambda: self._report(arg), "rapor": lambda: self._report(arg), "r": lambda: self._report(arg),
+            "detail": lambda: self._detail(arg), "detay": lambda: self._detail(arg), "d": lambda: self._detail(arg),
+            "guide": lambda: self._guide(arg), "rehber": lambda: self._guide(arg), "g": lambda: self._guide(arg),
+            "export": lambda: self._export(arg), "e": lambda: self._export(arg),
+            "categories": self._categories, "kategoriler": self._categories, "c": self._categories, "cat": self._categories,
+            "profiles": self._profiles, "profiller": self._profiles,
+            "stats": self._stats, "istatistik": self._stats,
+            "clear": self._clear, "temizle": self._clear,
+            "update": self._update, "guncelle": self._update,
+            "help": lambda: self.console.print(HELP_TEXT), "yardim": lambda: self.console.print(HELP_TEXT), "h": lambda: self.console.print(HELP_TEXT),
+            "quit": lambda: sys.exit(0), "exit": lambda: sys.exit(0), "q": lambda: sys.exit(0), "cikis": lambda: sys.exit(0),
+        }
+
+        fn = cmds.get(word)
+        if fn:
+            fn()
+        elif text.strip() in (".", "./"):
+            self.console.print("\n[yellow]  Mevcut dizini taramak yerine proje yolunu belirtin.[/yellow]")
+            self.console.print("[dim]  Ornek: ~/Desktop/MyProject[/dim]\n")
+        elif os.path.exists(os.path.expanduser(text.strip())) or text.strip().startswith("/") or text.strip().startswith("~"):
+            self._scan(text.strip())
+        else:
+            # Belki Desktop/proje seklinde yazmistir
+            desktop_try = os.path.expanduser(f"~/Desktop/{text.strip()}")
+            if os.path.exists(desktop_try):
+                self._scan(text.strip())
+            else:
+                self.console.print(f"\n[dim]  '{text.strip()}' bulunamadi. help yazin veya proje yolunu girin.[/dim]\n")
+
+    def _scan(self, path_str):
+        if not path_str:
+            self.console.print("\n[yellow]  Hangi projeyi taramak istiyorsunuz?[/yellow]")
+            self.console.print("[dim]  Ornek: /scan ~/Desktop/MyProject[/dim]")
+            self.console.print("[dim]  Veya direkt dosya yolunu yazin: ~/Desktop/MyProject[/dim]\n")
+            return
+        # Path duzeltmeleri
+        expanded = os.path.expanduser(path_str)
+        # /desktop/x -> /Users/kullanici/Desktop/x otomatik cevir
+        if expanded.lower().startswith("/desktop/"):
+            expanded = os.path.expanduser("~/Desktop/" + expanded[9:])
+        elif expanded.lower().startswith("desktop/"):
+            expanded = os.path.expanduser("~/Desktop/" + expanded[8:])
+        path = Path(expanded).resolve()
+        if not path.exists():
+            self.console.print(f"\n[red]  Yol bulunamadi: {path}[/red]")
+            self.console.print("[dim]  Dosya yolunu kontrol edin. Tab ile otomatik tamamlama kullanabilirsiniz.[/dim]\n")
+            return
+
+        # Proje dizini teyidi
+        verified = self._verify_project_path(path)
+        if verified is None:
+            return  # kullanici iptal etti
+        path = verified
+
+        self.project_path = str(path)
+        start_time = time.time()
+
+        from nazar.scanner.project_scanner import ProjectScanner
+        from nazar.planner.test_planner import TestPlanner
+        from nazar.runners.orchestrator import TestOrchestrator
+        from nazar.cache.scan_cache import ScanCache
+        from rich.live import Live
+
+        # Faz 0: Hizli on-analiz - proje tipini goster
+        scan_start = time.time()
+        scanner = ProjectScanner(self.project_path)
+
+        # Proje tipini hizlica tespit et (sadece tech_stack)
+        scanner._detect_tech_stack()
+        tech = scanner.result.tech_stack
+        proj_name = path.name
+
+        self.console.print(f"\n  [bold]{proj_name}[/bold] [dim]({tech})[/dim]")
+
+        # Onceki tarama var mi?
+        cache = ScanCache(self.project_path)
+        prev = cache.get_last_scan_summary()
+        if prev:
+            self.console.print(f"  [dim]Onceki tarama: {prev['grade']} ({prev['pass_rate']}%) - {cache.time_since_last_scan()}[/dim]")
+
+        # Profil secim menusu
+        profile = self._select_profile(tech, prev)
+        if profile is None:
+            return
+
+        def _scan_with_live():
+            """Tarama sirasinda canli dosya gosterimi."""
+            import threading
+            result_holder = [None]
+            done = threading.Event()
+
+            def do_scan():
+                result_holder[0] = scanner.scan()
+                done.set()
+
+            t = threading.Thread(target=do_scan, daemon=True)
+            t.start()
+
+            dots = ["   ", ".  ", ".. ", "..."]
+            idx = 0
+            with Live(console=self.console, refresh_per_second=4, transient=True) as live:
+                while not done.is_set():
+                    elapsed = time.time() - scan_start
+                    file_count = len(scanner.result.source_files) if hasattr(scanner, 'result') else 0
+                    tech = scanner.result.tech_stack if hasattr(scanner, 'result') and scanner.result.tech_stack != "unknown" else ""
+                    idx += 1
+
+                    tech_str = f" | {tech}" if tech else ""
+                    anim = dots[idx % len(dots)]
+                    panel_content = (
+                        f"  [bold cyan]1/3[/bold cyan] Proje taraniyor{anim}\n"
+                        f"  [dim]{elapsed:.1f}s | {file_count} dosya{tech_str}[/dim]"
+                    )
+                    live.update(Panel(panel_content, border_style="cyan", expand=False))
+                    done.wait(timeout=0.25)
+
+            return result_holder[0]
+
+        scan_result = _scan_with_live()
+        scan_dur = time.time() - scan_start
+        self.console.print(f"  [bold cyan][1/3][/bold cyan] Proje tarandi [green]{scan_result.tech_stack}[/green] | {scan_result.screen_count} ekran | {scan_result.api_endpoint_count} API | {len(scan_result.source_files)} dosya [dim]({scan_dur:.1f}s)[/dim]")
+
+        # Faz 2: Planlama (secilen profil ile)
+        plan_start = time.time()
+        plan_profile = profile if profile not in ("incremental", "diff") else "full"
+        planner = TestPlanner(scan_result, profile=plan_profile)
+        plan = planner.create_plan()
+        self.plan_data = plan.to_dict()
+        plan_dur = time.time() - plan_start
+        self.console.print(f"  [bold yellow][2/3][/bold yellow] {plan.total_tests} test planlanidi ({len(plan.categories)} kategori) [dim]({plan_dur:.1f}s)[/dim]")
+
+        # Faz 3: Calistirma - CANLI IZLEME
+        self.console.print(f"  [bold green][3/3][/bold green] Testler calistiriliyor...\n")
+        orchestrator = TestOrchestrator(self.project_path, self.plan_data)
+        tests = self.plan_data.get("tests", [])
+        self.results = []
+        passed = 0
+        failed = 0
+        current_cat = ""
+        cat_results = {}
+
+        from rich.live import Live
+
+        run_start = time.time()
+        active_test_name = ""
+        active_test_start = 0
+        active_test_idx = [0]
+        spin_frames = [">", ">>", ">>>", ">>"]
+        spin_idx = [0]
+
+        def build_live_with_spinner():
+            """Spinner dahil canli gosterim."""
+            completed = len(self.results)
+            total = len(tests)
+            pct = (completed / total * 100) if total > 0 else 0
+            elapsed = time.time() - run_start
+            rate = (passed / completed * 100) if completed > 0 else 0
+
+            bar_w = 30
+            filled = int(bar_w * completed / max(total, 1))
+            bar = "[green]" + "=" * filled + "[/green][dim]" + "-" * (bar_w - filled) + "[/dim]"
+
+            spin = spin_frames[spin_idx[0] % len(spin_frames)]
+            spin_idx[0] += 1
+            active_elapsed = time.time() - active_test_start if active_test_start else 0
+
+            if active_test_name:
+                active_line = f"  [yellow]{spin}[/yellow] [bold]{active_test_name[:50]}[/bold] [dim]{active_elapsed:.0f}s[/dim]"
+            else:
+                active_line = "  [dim]Bekleniyor...[/dim]"
+
+            # Son testler
+            recent_lines = []
+            for r in self.results[-3:]:
+                icon = "[green]OK[/green]" if r["passed"] else "[red]XX[/red]"
+                recent_lines.append(f"  {icon} {r['name'][:42]} [dim]{r.get('duration',0):.1f}s[/dim]")
+            recent_text = "\n".join(recent_lines) if recent_lines else ""
+
+            # Kategoriler
+            cat_lines = []
+            for cat, cd in cat_results.items():
+                ct = cd["p"] + cd["f"]
+                cr = (cd["p"] / ct * 100) if ct > 0 else 0
+                ci = "[green]+[/green]" if cr >= 80 else "[yellow]![/yellow]" if cr >= 50 else "[red]-[/red]"
+                mini_w = 8
+                mini_f = int(mini_w * cd["p"] / max(ct, 1))
+                mini_bar = "[green]" + "=" * mini_f + "[/green][dim]" + "-" * (mini_w - mini_f) + "[/dim]"
+                is_active = " [yellow]<[/yellow]" if cat == current_cat else ""
+                cat_lines.append(f"  {ci} {cat[:14]:<14} {cd['p']:>2}/{ct:<2} {mini_bar}{is_active}")
+            cat_text = "\n".join(cat_lines[-8:]) if cat_lines else ""
+
+            # Siradaki testler (her zaman goster)
+            next_lines = []
+            ci = active_test_idx[0] + 1
+            for t in tests[ci:ci+3]:
+                next_lines.append(f"  [dim]{t.get('name','')[:45]}[/dim]")
+            if ci + 3 < total:
+                next_lines.append(f"  [dim]...ve {total - ci - 3} test daha[/dim]")
+            next_text = "\n".join(next_lines) if next_lines else "  [dim]Son testler calisiyor[/dim]"
+
+            return Panel(
+                f"  {bar}  {completed}/{total} ({pct:.0f}%)  [dim]{elapsed:.0f}s[/dim]\n"
+                f"  [green]{passed} gecti[/green]  [red]{failed} kaldi[/red]  [dim]{rate:.0f}%[/dim]\n\n"
+                f"[bold]Aktif:[/bold]\n{active_line}\n\n"
+                f"[bold]Son:[/bold]\n{recent_text}\n\n"
+                f"[bold]Kategoriler:[/bold]\n{cat_text}\n\n"
+                f"[bold]Siradaki:[/bold]\n{next_text}",
+                title="[bold cyan]NAZAR CANLI[/bold cyan]",
+                border_style="cyan",
+            )
+
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Paralel batch boyutu - bagimsiz testleri ayni anda calistir
+        BATCH_SIZE = 6
+
+        try:
+            with Live(build_live_with_spinner(), console=self.console, refresh_per_second=4, transient=True) as live:
+                i = 0
+                while i < len(tests):
+                    batch = tests[i:i + BATCH_SIZE]
+                    futures = {}
+                    active_names = []
+
+                    with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
+                        for j, test in enumerate(batch):
+                            test_cat = test.get("type", "other")
+                            if test_cat not in cat_results:
+                                cat_results[test_cat] = {"p": 0, "f": 0}
+                            futures[executor.submit(orchestrator._run_test, test)] = (i + j, test)
+                            active_names.append(test.get("name", "?")[:30])
+
+                        current_cat = batch[0].get("type", "")
+                        active_test_name = " | ".join(active_names[:3])
+                        if len(active_names) > 3:
+                            active_test_name += f" +{len(active_names)-3}"
+                        active_test_start = time.time()
+                        active_test_idx[0] = i
+
+                        # Spinner guncelle, tamamlananlari isle
+                        done_futures = set()
+                        while len(done_futures) < len(futures):
+                            live.update(build_live_with_spinner())
+                            time.sleep(0.25)
+                            for fut in list(futures):
+                                if fut.done() and fut not in done_futures:
+                                    done_futures.add(fut)
+                                    idx_f, test_f = futures[fut]
+                                    result = fut.result()
+                                    self.results.append(result)
+                                    tc = test_f.get("type", "other")
+                                    if result["passed"]:
+                                        passed += 1
+                                        cat_results[tc]["p"] += 1
+                                    else:
+                                        failed += 1
+                                        cat_results[tc]["f"] += 1
+
+                    i += BATCH_SIZE
+                    current_cat = ""
+                    active_test_name = ""
+                    live.update(build_live_with_spinner())
+        except KeyboardInterrupt:
+            self.console.print("\n[dim]Tarama iptal edildi.[/dim]")
+
+        total_dur = time.time() - start_time
+        rate = (passed / len(self.results) * 100) if self.results else 0
+        grade = _grade(rate)
+        gs = "green" if rate >= 80 else "yellow" if rate >= 60 else "red"
+
+        self.console.print()
+        self.console.print(Panel(
+            f"[bold {gs}]Not: {grade} ({rate:.0f}%)[/bold {gs}]  |  "
+            f"[green]{passed} passed[/green]  |  [red]{failed} failed[/red]  |  "
+            f"[dim]{len(self.results)} test  |  {total_dur:.1f}s[/dim]",
+            title="[bold cyan]SONUC[/bold cyan]", border_style="cyan",
+        ))
+
+        cats = {}
+        for r in self.results:
+            cat = r.get("type", "other")
+            cats.setdefault(cat, {"passed": 0, "failed": 0})
+            cats[cat]["passed" if r["passed"] else "failed"] += 1
+
+        self.console.print()
+        for cat, d in cats.items():
+            total = d["passed"] + d["failed"]
+            cr = (d["passed"] / total * 100) if total > 0 else 0
+            filled = int(15 * d["passed"] / max(total, 1))
+            bar = "[green]" + "█" * filled + "[/green][dim]" + "░" * (15 - filled) + "[/dim]"
+            icon = "[green]+[/green]" if cr >= 80 else "[yellow]![/yellow]" if cr >= 50 else "[red]-[/red]"
+            rs = f"[green]{cr:.0f}%[/green]" if cr >= 80 else f"[yellow]{cr:.0f}%[/yellow]" if cr >= 50 else f"[red]{cr:.0f}%[/red]"
+            self.console.print(f"  {icon} {cat.upper():<16} {d['passed']:>3}/{total:<3} {rs:>6}  {bar}")
+
+        fl = [r for r in self.results if not r["passed"]]
+        if fl:
+            self.console.print(f"\n[bold]{len(fl)} BASARISIZ TEST:[/bold]\n")
+            for i, r in enumerate(fl, 1):
+                pri = r.get("priority", "medium")
+                ps = {"critical": "bold red", "high": "bold yellow", "medium": "cyan", "low": "dim"}.get(pri, "dim")
+                conf = r.get("confidence", "?")
+                dur = r.get("duration", 0)
+                self.console.print(f"  [dim]#{i:>2}[/dim] [{ps}]{pri.upper():<8}[/{ps}] [bold]{r['name']}[/bold]")
+                self.console.print(f"       [dim]Kategori:[/dim] {r.get('type','').upper()}  [dim]Guven:[/dim] {conf}%  [dim]Sure:[/dim] {dur:.1f}s")
+                self.console.print(f"       {r.get('detail', '')}")
+                if r.get("how_to_fix"):
+                    self.console.print(f"       [green]Fix:[/green] {r['how_to_fix'].get('quick_fix', '')}")
+                self.console.print()
+        self.console.print(f"[dim]d <no>: daha fazla detay | g <no>: rehber | r: tablo | e html: export[/dim]")
+
+    def _report(self, filt):
+        if not self.results:
+            self.console.print("[yellow]Once tarama yapin: /scan <yol>[/yellow]")
+            return
+        if filt == "failed":
+            tests = [r for r in self.results if not r["passed"]]
+        elif filt == "passed":
+            tests = [r for r in self.results if r["passed"]]
+        elif filt and filt != "all":
+            tests = [r for r in self.results if r.get("type") == filt]
+        else:
+            tests = [r for r in self.results if not r["passed"]]
+        if not tests:
+            self.console.print("[green]Sonuc yok![/green]")
+            return
+        table = Table(title=f"Sonuclar ({len(tests)})", box=box.ROUNDED)
+        table.add_column("#", width=4, style="dim")
+        table.add_column("Oncelik", width=8)
+        table.add_column("Test", ratio=3)
+        table.add_column("Sonuc", width=7)
+        table.add_column("Guven", width=6)
+        table.add_column("Detay", ratio=2, style="dim")
+        for i, r in enumerate(tests, 1):
+            pri = r.get("priority", "medium")
+            ps = {"critical":"bold red","high":"yellow","medium":"cyan","low":"dim"}.get(pri,"dim")
+            st = "[green]PASSED[/green]" if r["passed"] else "[red]FAILED[/red]"
+            table.add_row(str(i), f"[{ps}]{pri.upper()}[/{ps}]", r["name"][:45], st, f"{r.get('confidence','?')}%", r.get("detail","")[:35])
+        self.console.print(table)
+
+    def _detail(self, num):
+        if not self.results:
+            self.console.print("[yellow]Once tarama yapin.[/yellow]")
+            return
+        try:
+            idx = int(num) - 1
+        except (ValueError, TypeError):
+            self.console.print("[red]/detail 1 seklinde girin.[/red]")
+            return
+        fl = [r for r in self.results if not r["passed"]]
+        if idx < 0 or idx >= len(fl):
+            self.console.print(f"[red]1-{len(fl)} arasi girin.[/red]")
+            return
+        r = fl[idx]
+        self.console.print(Panel(f"[bold]{r['name']}[/bold]\n\nOncelik: [bold]{r.get('priority','').upper()}[/bold] | Guven: [bold]{r.get('confidence','?')}%[/bold]\nKategori: {r.get('type','').upper()}\n\n[bold]Detay:[/bold] {r.get('detail','')}", title=f"[bold cyan]#{idx+1}[/bold cyan]", border_style="cyan"))
+        detail = r.get("detail", "")
+        m = re.search(r'([a-zA-Z0-9_/\-\.()]+\.[a-zA-Z]+):(\d+)', detail)
+        if m and self.project_path:
+            fp, ln = m.group(1), int(m.group(2))
+            full = os.path.join(self.project_path, fp)
+            if os.path.exists(full):
+                try:
+                    lines = open(full, errors="ignore").readlines()
+                    s, e = max(0, ln-3), min(len(lines), ln+3)
+                    code = "".join(lines[s:e])
+                    lang = "typescript" if fp.endswith((".ts",".tsx")) else "python" if fp.endswith(".py") else "javascript"
+                    self.console.print(Panel(Syntax(code, lang, theme="monokai", line_numbers=True, start_line=s+1, highlight_lines={ln}), title=f"[bold]{fp}[/bold]", border_style="red"))
+                except Exception:
+                    pass
+        self.console.print(f"\n[dim]Rehber: /guide {idx+1}[/dim]")
+
+    def _guide(self, num):
+        if not self.results:
+            self.console.print("[yellow]Once tarama yapin.[/yellow]")
+            return
+        try:
+            idx = int(num) - 1
+        except (ValueError, TypeError):
+            self.console.print("[red]/guide 1 seklinde girin.[/red]")
+            return
+        fl = [r for r in self.results if not r["passed"]]
+        if idx < 0 or idx >= len(fl):
+            self.console.print(f"[red]1-{len(fl)} arasi girin.[/red]")
+            return
+        r = fl[idx]
+        guide = r.get("guide")
+        if not guide:
+            fix = r.get("how_to_fix")
+            if fix:
+                self.console.print(f"\n[bold red]SORUN:[/bold red] {fix.get('sorun','')}")
+                self.console.print(f"[bold green]COZUM:[/bold green] {fix.get('cozum','')}")
+                self.console.print(f"[bold cyan]QUICK FIX:[/bold cyan] {fix.get('quick_fix','')}")
+            else:
+                self.console.print("[yellow]Bu test icin rehber yok.[/yellow]")
+            return
+        ct = Text()
+        ct.append(f"\n  RISK: ", style="bold red")
+        ct.append(f"{guide['risk']}\n\n")
+        ct.append(f"  Ne Oluyor: ", style="bold")
+        ct.append(f"{guide['what']}\n")
+        ct.append(f"  Neden Onemli: ", style="bold")
+        ct.append(f"{guide['why']}\n")
+        self.console.print(Panel(ct, title=f"[bold yellow]{guide['title']}[/bold yellow]", border_style="yellow"))
+        steps = guide.get("steps", [])
+        if steps:
+            self.console.print("\n[bold]  ADIM ADIM:[/bold]")
+            for i, s in enumerate(steps, 1):
+                self.console.print(f"  [cyan]{i}.[/cyan] {s}")
+        before, after = guide.get("before", ""), guide.get("after", "")
+        if before and after:
+            self.console.print()
+            self.console.print(Panel(before, title="[red]ONCE[/red]", border_style="red"))
+            self.console.print(Panel(after, title="[green]SONRA[/green]", border_style="green"))
+        if guide.get("warning"):
+            self.console.print(f"\n[yellow]  UYARI: {guide['warning']}[/yellow]")
+        if guide.get("tools"):
+            self.console.print(f"[dim]  Onerilen: {', '.join(guide['tools'])}[/dim]")
+        self.console.print()
+
+    def _export(self, fmt_str):
+        if not self.results:
+            self.console.print("[yellow]Once tarama yapin.[/yellow]")
+            return
+        parts = fmt_str.split(None, 1)
+        fmt = parts[0] if parts else "html"
+        out = parts[1] if len(parts) > 1 else None
+        if fmt == "html":
+            out = out or "nazar-report.html"
+            from nazar.reporter.html_reporter import HTMLReporter
+            HTMLReporter().generate(self.results, self.plan_data or {}, out)
+        elif fmt == "json":
+            out = out or "nazar-report.json"
+            from nazar.reporters.json_reporter import JSONReporter
+            JSONReporter().generate(self.results, self.plan_data or {}, out)
+        elif fmt == "sarif":
+            out = out or "nazar-report.sarif"
+            from nazar.reporters.sarif_reporter import SARIFReporter
+            SARIFReporter().generate(self.results, self.plan_data or {}, out)
+        elif fmt == "markdown":
+            out = out or "nazar-report.md"
+            from nazar.reporters.markdown_reporter import MarkdownReporter
+            MarkdownReporter().generate(self.results, self.plan_data or {}, out)
+        elif fmt == "junit":
+            out = out or "nazar-report.xml"
+            from nazar.reporters.junit_reporter import JUnitReporter
+            JUnitReporter().generate(self.results, self.plan_data or {}, out)
+        else:
+            self.console.print(f"[red]Format: html/json/sarif/markdown/junit[/red]")
+            return
+        self.console.print(f"[green]Rapor olusturuldu: {out}[/green]")
+
+    def _categories(self):
+        table = Table(title="Nazar v4.0 Kategorileri", box=box.ROUNDED)
+        table.add_column("Kategori", style="cyan", width=18)
+        table.add_column("Kontrol", justify="center", width=8)
+        table.add_column("Aciklama", ratio=3)
+        cats = [
+            ("Security", "63", "50+ secret, OWASP, crypto, supply chain"),
+            ("App Store", "32", "Privacy manifest, IAP, Sign in with Apple"),
+            ("Play Store", "10", "targetSdk, exported, ProGuard, permissions"),
+            ("SCA", "7", "npm/pip/go audit, typosquatting, lisans"),
+            ("AST Analysis", "6", "Python AST: eval, bare except, mutable default"),
+            ("Taint Tracking", "5", "SQL injection, XSS, command injection akisi"),
+            ("Code Quality", "16", "Complexity, dead code, smells"),
+            ("UI Component", "10", "a11y, touch target, dark mode"),
+            ("UX Text", "8", "Yazim, tutarlilik, i18n"),
+            ("Cross-File", "7", "Dead export, orphan, circular import"),
+            ("API", "4", "Erisilebilirlik, response"),
+            ("Git", "4", "gitignore, buyuk dosya"),
+            ("YAML Rules", "3", "Semgrep benzeri ozel kural motoru"),
+            ("Type Safety", "3", "any, ts-ignore"),
+            ("Error Handling", "3", "Bos catch, async"),
+            ("Performance", "3", "Buyuk dosya/gorsel"),
+            ("Documentation", "3", "README, CHANGELOG"),
+            ("Naming", "3", "Dosya isimleri"),
+            ("Dependency", "3", "Vulnerability"),
+            ("Accessibility", "2", "testID, label"),
+            ("Docker", "2", "Image, secret"),
+        ]
+        for n, c, d in cats:
+            table.add_row(n, c, d)
+        table.add_row("[bold]TOPLAM[/bold]", "[bold]197+[/bold]", "")
+        self.console.print(table)
+
+    def _profiles(self):
+        """Mevcut test profillerini Rich tablosu ile goster."""
+        from nazar.planner.profiles import TEST_PROFILES
+
+        PROFILE_COLORS = {
+            "full": "green",
+            "frontend": "cyan",
+            "backend": "blue",
+            "security": "yellow",
+            "mobile": "magenta",
+            "ci": "red",
+            "dependency": "bright_cyan",
+            "performance": "bright_yellow",
+        }
+
+        table = Table(title="Nazar Test Profilleri", box=box.ROUNDED)
+        table.add_column("Profil", style="bold", width=14)
+        table.add_column("Aciklama", ratio=3)
+        table.add_column("Kategori", justify="center", width=10)
+        table.add_column("Kategoriler", ratio=4)
+
+        for key, profile in TEST_PROFILES.items():
+            color = PROFILE_COLORS.get(key, "white")
+            name_cell = f"[{color}]{profile['name']}[/{color}]"
+
+            cats = profile.get("categories", "__all__")
+            if cats == "__all__":
+                cat_count = "Tumu"
+                cat_list = "[dim]Tech stack'e gore otomatik[/dim]"
+            else:
+                cat_count = str(len(cats))
+                cat_list = ", ".join(cats)
+
+            est = profile.get("estimated_minutes", 0)
+            desc = f"{profile['description']} [dim](~{est}dk)[/dim]"
+
+            table.add_row(name_cell, desc, cat_count, cat_list)
+
+        self.console.print(table)
+
+    # === Profil Secim Sistemi ===
+
+    def _select_profile(self, tech: str, prev_scan: dict) -> str:
+        """Kullaniciya profil secim menusu goster."""
+        from nazar.planner.profiles import TEST_PROFILES
+
+        self.console.print()
+        self.console.print("  [bold]Ne test etmek istiyorsun?[/bold]")
+        self.console.print()
+
+        options = []
+        idx = 1
+
+        # 1. Tam tarama (her zaman)
+        options.append(("full", "Tam tarama", "Tum kategoriler", "~5-10dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Tam tarama              [dim]Tum kategoriler (~5-10dk)[/dim]")
+        idx += 1
+
+        # 2-3. Hizli/karsilastirmali (onceki tarama varsa)
+        if prev_scan:
+            options.append(("incremental", "Hizli tarama", "Sadece degisen dosyalar", "~1dk"))
+            self.console.print(f"  [bold cyan][{idx}][/bold cyan] Hizli tarama            [dim]Sadece degisen dosyalar (~1dk)[/dim]")
+            idx += 1
+
+            options.append(("diff", "Karsilastirmali", "Onceki sonucla diff", "~5-10dk"))
+            self.console.print(f"  [bold cyan][{idx}][/bold cyan] Karsilastirmali         [dim]Onceki sonucla diff (~5-10dk)[/dim]")
+            idx += 1
+
+        # 4. Frontend
+        options.append(("frontend", "Frontend / UI", "UX, UI, accessibility, renk, form", "~2-3dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Frontend / UI           [dim]UX, renk, form, accessibility (~2-3dk)[/dim]")
+        idx += 1
+
+        # 5. Backend
+        options.append(("backend", "Backend / API", "Security, API, taint, code quality", "~3-4dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Backend / API           [dim]Security, taint, code quality (~3-4dk)[/dim]")
+        idx += 1
+
+        # 6. Guvenlik
+        options.append(("security", "Guvenlik", "63 guvenlik + SCA + taint + AST", "~4-5dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Guvenlik                [dim]OWASP, SCA, taint tracking (~4-5dk)[/dim]")
+        idx += 1
+
+        # 7. Mobil (sadece mobil projeler)
+        if tech in ("react-native", "flutter", "ios-native", "android-native"):
+            options.append(("mobile", "Mobil uyumluluk", "App Store + Play Store", "~3-4dk"))
+            self.console.print(f"  [bold cyan][{idx}][/bold cyan] Mobil uyumluluk         [dim]App Store + Play Store (~3-4dk)[/dim]")
+            idx += 1
+
+        # 8. Dependency
+        options.append(("dependency", "Dependency analizi", "SCA, lisans, versiyon kontrolleri", "~2-3dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Dependency analizi      [dim]SCA, lisans, versiyon (~2-3dk)[/dim]")
+        idx += 1
+
+        # 9. Performance
+        options.append(("performance", "Performans", "Bundle, gorsel, lazy load", "~2-3dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Performans              [dim]Bundle, gorsel, lazy load (~2-3dk)[/dim]")
+        idx += 1
+
+        # 10. CI/CD
+        options.append(("ci", "CI/CD (hizli)", "Sadece kritik testler", "~1dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] CI/CD (hizli)           [dim]Sadece kritik testler (~1dk)[/dim]")
+        idx += 1
+
+        self.console.print()
+
+        try:
+            choice = self.session.prompt(HTML('<style fg="#6366f1"><b>sec</b></style><style fg="#475569"> (1-' + str(len(options)) + ')&gt; </style>'))
+            choice = choice.strip()
+            ci = int(choice) - 1
+            if 0 <= ci < len(options):
+                selected = options[ci]
+                self.console.print(f"  [green]Secildi: {selected[1]}[/green]\n")
+                return selected[0]
+        except (ValueError, KeyboardInterrupt, EOFError):
+            pass
+
+        self.console.print("  [dim]Iptal edildi.[/dim]\n")
+        return None
+
+    # === Proje Dizini Teyit Sistemi ===
+
+    PROJECT_MARKERS = [
+        "package.json", "pyproject.toml", "setup.py", "requirements.txt",
+        "pubspec.yaml", "go.mod", "Cargo.toml", "composer.json",
+        "Gemfile", "build.gradle", "pom.xml", "Makefile",
+        "app.json", "next.config.js", "nuxt.config.js", "vite.config.ts",
+        "manage.py", "settings.py", "tsconfig.json", ".gitignore",
+    ]
+
+    def _verify_project_path(self, path: Path) -> Path:
+        """Proje dizinini teyit et. Yanlis dizinse oner, kullanici secsin."""
+        # 1. Proje dosyasi var mi kontrol et
+        markers_found = [m for m in self.PROJECT_MARKERS if (path / m).exists()]
+
+        if markers_found:
+            # Proje bulundu, teyit goster
+            self.console.print(f"\n  [green]Proje bulundu:[/green] {path.name}/")
+            self.console.print(f"  [dim]Belirtecler: {', '.join(markers_found[:4])}[/dim]")
+            return path
+
+        # 2. Proje dosyasi yok - belki ust dizin secilmis
+        # Alt dizinlerde proje var mi?
+        sub_projects = []
+        try:
+            for child in sorted(path.iterdir()):
+                if child.is_dir() and not child.name.startswith("."):
+                    child_markers = [m for m in self.PROJECT_MARKERS if (child / m).exists()]
+                    if child_markers:
+                        sub_projects.append({"name": child.name, "path": child, "markers": child_markers})
+        except PermissionError:
+            pass
+
+        if not sub_projects:
+            self.console.print(f"\n  [yellow]Bu dizinde proje bulunamadi: {path}[/yellow]")
+            self.console.print("  [dim]package.json, pyproject.toml gibi dosyalar yok.[/dim]")
+            self.console.print("  [dim]Dogrudan proje kokunu secin.[/dim]\n")
+            return None
+
+        # 3. Alt dizinlerde proje bulundu - kullaniciya sor
+        self.console.print(f"\n  [yellow]'{path.name}/' proje koku degil, ama alt dizinlerde proje bulundu:[/yellow]\n")
+        for i, sp in enumerate(sub_projects[:9], 1):
+            markers_str = ", ".join(sp["markers"][:3])
+            self.console.print(f"  [{i}] {sp['name']}/  [dim]({markers_str})[/dim]")
+        self.console.print(f"  [0] Yine de '{path.name}/' dizinini tara")
+        self.console.print()
+
+        try:
+            choice = self.session.prompt(HTML('<style fg="#6366f1"><b>sec</b></style><style fg="#475569">&gt; </style>'))
+            choice = choice.strip()
+            if choice == "0":
+                return path
+            idx = int(choice) - 1
+            if 0 <= idx < len(sub_projects):
+                selected = sub_projects[idx]
+                self.console.print(f"  [green]Secildi: {selected['name']}/[/green]")
+                return selected["path"]
+        except (ValueError, KeyboardInterrupt, EOFError):
+            pass
+
+        self.console.print("  [dim]Iptal edildi.[/dim]\n")
+        return None
+
+    def _check_update_on_start(self):
+        """Acilista sessizce guncelleme kontrol et."""
+        import threading
+        def _check():
+            try:
+                import urllib.request, json
+                from nazar import __version__
+                resp = urllib.request.urlopen("https://pypi.org/pypi/nazar/json", timeout=3)
+                data = json.loads(resp.read())
+                latest = data["info"]["version"]
+                if latest != __version__:
+                    self.console.print(f"\n  [bold yellow]Guncelleme mevcut: v{__version__} -> v{latest}[/bold yellow]")
+                    self.console.print(f"  [dim]/update yazarak guncelleyebilirsiniz.[/dim]")
+                else:
+                    self.console.print(f"  [dim green]Guncel (v{__version__})[/dim green]")
+            except Exception:
+                pass
+        # Ana thread'i bloklamadan kontrol et
+        t = threading.Thread(target=_check, daemon=True)
+        t.start()
+        t.join(timeout=4)
+
+    def _update(self):
+        """Nazar'i son versiyona guncelle."""
+        import subprocess as _sp
+        self.console.print("\n  [bold cyan]Guncelleme kontrol ediliyor...[/bold cyan]")
+        try:
+            from nazar import __version__
+            current = __version__
+        except (ImportError, AttributeError):
+            current = "?"
+        try:
+            import urllib.request, json
+            resp = urllib.request.urlopen("https://pypi.org/pypi/nazar/json", timeout=10)
+            data = json.loads(resp.read())
+            latest = data["info"]["version"]
+        except Exception:
+            latest = "?"
+        if current == latest and current != "?":
+            self.console.print(f"  [green]Zaten guncel: v{current}[/green]\n")
+            return
+        if latest != "?":
+            self.console.print(f"  Mevcut: v{current}  ->  Yeni: v{latest}")
+        try:
+            r = _sp.run(["pipx", "upgrade", "nazar"], capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                self.console.print(f"  [green]Guncellendi! v{latest}[/green]\n")
+                return
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            pass
+        try:
+            r = _sp.run([sys.executable, "-m", "pip", "install", "--upgrade", "nazar"], capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                self.console.print(f"  [green]Guncellendi! v{latest}[/green]\n")
+                return
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            pass
+        self.console.print("  [red]Otomatik guncelleme basarisiz.[/red]")
+        self.console.print("  [dim]Manuel: pipx upgrade nazar[/dim]\n")
+
+    def _clear(self):
+        self._show_header()
+
+    def _stats(self):
+        from nazar.guides.registry import GuideRegistry
+        from nazar.runners.confidence import CONFIDENCE_SCORES
+        table = Table(title="Nazar v4.0", box=box.ROUNDED)
+        table.add_column("Metrik", style="cyan")
+        table.add_column("Deger", style="green")
+        table.add_row("Kontrol", "197+")
+        table.add_row("Kategori", "21")
+        table.add_row("Guide", str(len(GuideRegistry.get_all())))
+        table.add_row("Confidence", str(len(CONFIDENCE_SCORES)))
+        table.add_row("Framework", "15+")
+        table.add_row("Format", "5 (HTML, JSON, SARIF, Markdown, JUnit)")
+        table.add_row("Moduller", "SCA, AST, Taint, YAML Rules, App/Play Store")
+        if self.results:
+            p = sum(1 for r in self.results if r["passed"])
+            f = len(self.results) - p
+            table.add_row("", "")
+            table.add_row("[bold]Son Tarama[/bold]", f"[bold]{self.project_path}[/bold]")
+            table.add_row("Gecen/Kalan", f"[green]{p}[/green] / [red]{f}[/red]")
+        self.console.print(table)

@@ -1,0 +1,40 @@
+rules:
+  - id: inline-style
+    message: "Inline style tespit edildi - StyleSheet kullanin"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "style={{$VALUE}}"
+    fix: "StyleSheet.create() ile ayri tanimlayin"
+    metadata:
+      category: react_native
+
+  - id: hardcoded-string-ui
+    message: "UI'da hardcoded string - i18n icin hazirlayiniz"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "<Text>$VALUE</Text>"
+    constraint:
+      VALUE: /^[A-Za-z\s]{5,}$/
+    fix: "i18n kullanin: <Text>{t('key')}</Text>"
+    metadata:
+      category: react_native
+
+  - id: direct-alert
+    message: "Alert.alert dogrudan kullaniliyor - custom modal tercih edin"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "Alert.alert($VALUE)"
+    fix: "Tutarli UX icin custom AlertModal component'i olusturun"
+    metadata:
+      category: react_native
+
+  - id: async-storage-sensitive
+    message: "AsyncStorage'da hassas veri saklanabilir"
+    severity: warning
+    languages: [javascript, typescript]
+    pattern: "AsyncStorage.setItem('$KEY', $VALUE)"
+    constraint:
+      KEY: /token|password|secret|key|auth/i
+    fix: "SecureStore veya EncryptedStorage kullanin"
+    metadata:
+      category: react_native

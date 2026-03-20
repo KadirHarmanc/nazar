@@ -1,0 +1,45 @@
+rules:
+  - id: hardcoded-secret-assign
+    message: "Hardcoded secret tespit edildi"
+    severity: critical
+    languages: [javascript, typescript, python]
+    pattern: "$VAR = '$VALUE'"
+    constraint:
+      VAR: /password|secret|token|api_key|apikey|auth_token/i
+      VALUE: /^.{8,}$/
+    fix: "Degeri .env dosyasina tasiyin"
+    metadata:
+      category: security
+
+  - id: console-log-sensitive
+    message: "Hassas veri loglaniyor olabilir"
+    severity: warning
+    languages: [javascript, typescript]
+    pattern: "console.log($VALUE)"
+    constraint:
+      VALUE: /password|secret|token|key|credential/i
+    fix: "Production'da hassas veri loglamayin"
+    metadata:
+      category: security
+
+  - id: hardcoded-ip-address
+    message: "Hardcoded IP adresi tespit edildi"
+    severity: warning
+    languages: [javascript, typescript, python, go]
+    pattern: "'$VALUE'"
+    constraint:
+      VALUE: /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+    fix: "IP adresini environment variable'a tasiyin"
+    metadata:
+      category: security
+
+  - id: todo-with-secret
+    message: "TODO/FIXME icinde secret referansi"
+    severity: high
+    languages: [javascript, typescript, python]
+    pattern: "TODO...$VALUE"
+    constraint:
+      VALUE: /password|secret|token|key/i
+    fix: "TODO'yu temizleyin, secret'i .env'e tasiyin"
+    metadata:
+      category: security

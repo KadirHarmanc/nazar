@@ -1,0 +1,46 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+*.db
+*.sqlite
+.pytest_cache/
+.mypy_cache/
+node_modules/
+nazar-report*.html
+nazar-self*.html
+nazar-plan.json
+betterplate-*.html
+*.report.html
+
+# Nazar cache
+.nazar/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Internal development docs
+PLAN.md
+RESEARCH.md
+FEATURE-RESEARCH.md
+GELISTIRME-RAPORU.md
+GELISTIRME-PLANI-*.md
+APPLE-APPSTORE-PLAN.md
+PRE-REVIEW-ARGE.md
+BETTERPLATE-APPSTORE-EKSIKLER.md
+INTERACTIVE-CLI-ARGE.md
+RAKIP-ANALIZI.md
+TERSINE-MUHENDISLIK-ENTEGRASYON.md
+IMPLEMENTASYON-PLANI.md
+MIMARI-SECIM-VE-UI-TEST.md
+docs/apple-*.md
+nazar-landing*.html
+dist 2/

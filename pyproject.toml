@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nazar"
+version = "5.0.0"
+description = "Autonomous testing tool - scans your project, understands architecture, plans and runs tests"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+readme = "README.md"
+keywords = ["testing", "automation", "security", "code-quality", "linter", "sast", "react-native", "flutter", "django", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Security",
+]
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "prompt_toolkit>=3.0.0",
+]
+
+[project.optional-dependencies]
+turkish = ["zeyrek>=0.1.0", "pyspellchecker>=0.7.2"]
+dev = ["pytest>=7.4.0", "pytest-cov>=4.1.0", "black>=23.0", "ruff>=0.4.0", "mypy>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/user/nazar"
+Repository = "https://github.com/user/nazar"
+Documentation = "https://github.com/user/nazar#readme"
+"Bug Tracker" = "https://github.com/user/nazar/issues"
+Changelog = "https://github.com/user/nazar/blob/main/CHANGELOG.md"
+
+[project.scripts]
+nazar = "nazar.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nazar*"]
+exclude = ["tests*", "docs*", "vscode-nazar*"]
+
+[tool.setuptools.package-data]
+nazar = ["rules/*.yml", "rules/*.yaml"]
+
+[tool.black]
+line-length = 120
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

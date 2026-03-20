@@ -1,0 +1,39 @@
+rules:
+  - id: magic-number
+    message: "Magic number tespit edildi - sabit olarak tanimlayin"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "if ($VAR > $VALUE)"
+    constraint:
+      VALUE: /^\d{3,}$/
+    fix: "Sayiyi anlamli bir sabit olarak tanimlayin: const MAX_ITEMS = 100"
+    metadata:
+      category: code_quality
+
+  - id: nested-ternary
+    message: "Ic ice ternary operatoru - okunabilirligi azaltir"
+    severity: warning
+    languages: [javascript, typescript]
+    pattern: "$A ? $B : $C ? $D : $E"
+    fix: "if-else veya switch kullanin"
+    metadata:
+      category: code_quality
+
+  - id: empty-function
+    message: "Bos fonksiyon tespit edildi"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "function $NAME() {}"
+    fix: "Fonksiyonu doldurun veya TODO ekleyin"
+    metadata:
+      category: code_quality
+
+  - id: console-error-no-context
+    message: "console.error context olmadan kullaniliyor"
+    severity: info
+    languages: [javascript, typescript]
+    pattern: "console.error($VALUE)"
+    pattern_not: "console.error.*context|console.error.*where|console.error.*file"
+    fix: "Hata mesajina context ekleyin: console.error('ModulName:', error)"
+    metadata:
+      category: code_quality
