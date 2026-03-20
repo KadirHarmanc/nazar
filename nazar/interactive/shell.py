@@ -20,12 +20,12 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich import box
 
 
-BANNER = """[bold cyan]
-  _   _   ____  ______ ____  ____
- | \\ | | / () \\|_  /_// () \\| () )
- |_|\\__|/__/\\__\\/__/__\\\\__,_|_|\\_\\[/bold cyan]
-  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]
-"""
+BANNER = "[bold cyan]" + r"""
+  _  _   _   ____  _   ___
+ | \| | /_\ |_  / /_\ | _ \
+ | .` |/ _ \ / / / _ \|   /
+ |_|\_/_/ \_/___/_/ \_\_|_\
+""" + "[/bold cyan]  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]\n"
 
 HELP_TEXT = """
 [bold]BASLANGIC:[/bold]
@@ -980,9 +980,12 @@ class NazarShell:
                 resp = urllib.request.urlopen("https://pypi.org/pypi/nazar/json", timeout=3)
                 data = json.loads(resp.read())
                 latest = data["info"]["version"]
-                if latest != __version__:
+                # Versiyon karsilastir (tuple olarak)
+                def _ver(v):
+                    return tuple(int(x) for x in v.split(".")[:3])
+                if _ver(latest) > _ver(__version__):
                     self.console.print(f"\n  [bold yellow]Guncelleme mevcut: v{__version__} -> v{latest}[/bold yellow]")
-                    self.console.print(f"  [dim]/update yazarak guncelleyebilirsiniz.[/dim]")
+                    self.console.print(f"  [dim]update yazarak guncelleyebilirsiniz.[/dim]")
                 else:
                     self.console.print(f"  [dim green]Guncel (v{__version__})[/dim green]")
             except Exception:

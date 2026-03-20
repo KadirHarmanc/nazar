@@ -2,4 +2,4 @@
 
 Projeyi tarar, mimariyi anlar, test plani olusturur, testleri calistirir.
 """
-__version__ = "5.3.2"
+__version__ = "5.3.3"
