@@ -129,14 +129,20 @@ class ProjectScanner:
 
     def _find_screens(self):
         patterns = SCREEN_PATTERNS.get(self.result.tech_stack, SCREEN_PATTERNS["generic"])
+        compiled = [(re.compile(p), ct) for p, ct in patterns]
         seen = set()
-        for src_file in self.result.source_files:
+        # Sadece UI dosyalarini tara (test ve config haric, max 200)
+        ui_exts = {".tsx", ".jsx", ".ts", ".js", ".dart", ".swift", ".kt", ".vue", ".svelte"}
+        ui_files = [f for f in self.result.source_files if Path(f).suffix.lower() in ui_exts and "test" not in f.lower()][:200]
+        for src_file in ui_files:
             try:
                 content = (self.root / src_file).read_text(errors="ignore")
+                if len(content) > 200_000:
+                    continue
             except Exception:
                 continue
-            for pattern, comp_type in patterns:
-                for match in re.finditer(pattern, content):
+            for compiled_pat, comp_type in compiled:
+                for match in compiled_pat.finditer(content):
                     name = match.group(1)
                     key = f"{name}:{src_file}"
                     if name and len(name) > 1 and not name.startswith("_") and key not in seen:
@@ -145,13 +151,17 @@ class ProjectScanner:
 
     def _find_api_endpoints(self):
         seen = set()
-        for src_file in self.result.source_files:
+        # Max 150 dosya tara, test haric
+        api_files = [f for f in self.result.source_files if "test" not in f.lower()][:150]
+        for src_file in api_files:
             ext = Path(src_file).suffix.lower()
             lang = EXT_TO_API_LANG.get(ext)
             if not lang or lang not in API_PATTERNS:
                 continue
             try:
                 content = (self.root / src_file).read_text(errors="ignore")
+                if len(content) > 200_000:
+                    continue
             except Exception:
                 continue
             for pattern, default_method in API_PATTERNS[lang]:
@@ -193,7 +203,7 @@ class ProjectScanner:
             r"""(?:BASE_URL|API_URL|BACKEND_URL)\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]""",
             r"""baseURL\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]""",
         ]
-        search_files = list(self.root.glob(".env*")) + [self.root / f for f in self.result.source_files[:100]]
+        search_files = list(self.root.glob(".env*")) + [self.root / f for f in self.result.source_files[:30]]
         for path in search_files:
             try:
                 content = path.read_text(errors="ignore")
