@@ -580,9 +580,14 @@ class NazarShell:
 
         # Canli runtime test
         if run_live_test:
-            self._run_live_test(path)
+            try:
+                self._run_live_test(path)
+            except Exception:
+                self.console.print("  [dim]Canli test baslatılamadi[/dim]")
 
-        self.console.print(f"[dim]d <no>: daha fazla detay | g <no>: rehber | r: tablo | e html: export[/dim]")
+        self.console.print()
+        self.console.print("[bold cyan]Komutlar:[/bold cyan] [dim]d <no>[/dim] detay  [dim]g <no>[/dim] rehber  [dim]r[/dim] tablo  [dim]e html[/dim] export  [dim]help[/dim] yardim")
+        self.console.print()
 
     def _report(self, filt):
         if not self.results:
@@ -1138,39 +1143,55 @@ class NazarShell:
             except Exception:
                 pass
 
-        # 4. Maestro Studio ac - tarayicide gorsel arayuz
+        # 4. Maestro Studio ac - tarayicide gorsel arayuz (non-blocking)
         self.console.print()
-        self.console.print("  [bold cyan]Maestro Studio aciliyor...[/bold cyan]")
-        self.console.print("  [dim]Tarayicinizda simulator ekrani ve test adimlari gorunecek[/dim]")
-        self.console.print("  [dim]Kapatmak icin Ctrl+C basin[/dim]")
-        self.console.print()
+        self.console.print("  [bold cyan]Maestro Studio baslatiliyor...[/bold cyan]")
 
         try:
+            # Arka planda maestro studio baslat
+            self._maestro_process = _sp.Popen(
+                [maestro_bin, "studio"],
+                cwd=str(project_path),
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            # Maestro'nun baslamasini bekle
+            time.sleep(3)
+
+            if self._maestro_process.poll() is not None:
+                self.console.print("  [red]Maestro Studio baslatilAmadi[/red]")
+                return
+
             # Tarayiciyi ac
             webbrowser.open("http://localhost:9999")
 
-            # Maestro Studio baslat (blocking - Ctrl+C ile durur)
-            process = _sp.Popen(
-                [maestro_bin, "studio"],
-                cwd=str(project_path),
-                stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
-            )
-            try:
-                for line in iter(process.stdout.readline, ""):
-                    line = line.rstrip()
-                    if line:
-                        self.console.print(f"  [dim]{line[:80]}[/dim]")
-            except KeyboardInterrupt:
-                pass
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except _sp.TimeoutExpired:
-                        process.kill()
+            self.console.print("  [green]Maestro Studio acildi:[/green] http://localhost:9999")
+            self.console.print("  [dim]Tarayicida simulator ekrani ve test paneli gorunecek[/dim]")
+            self.console.print()
 
-            self.console.print("\n  [dim]Maestro Studio kapatildi[/dim]")
+            # Kullaniciya kontrol ver
+            if yaml_files:
+                self.console.print(f"  [bold]YAML test dosyalari ({len(yaml_files)}):[/bold]")
+                for yf in yaml_files:
+                    self.console.print(f"    [cyan]{yf.name}[/cyan]")
+                self.console.print()
+                self.console.print("  [dim]Maestro Studio'da bu dosyalari yukleyip test edebilirsiniz[/dim]")
+                self.console.print("  [dim]Dosya yolu: {}/[/dim]".format(str(ui_dir)))
+
+            self.console.print()
+            try:
+                self.session.prompt(HTML('<style fg="#06b6d4"><b>Kapatmak icin Enter basin</b></style><style fg="#475569">&gt; </style>'))
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+            # Maestro'yu kapat
+            if self._maestro_process.poll() is None:
+                self._maestro_process.terminate()
+                try:
+                    self._maestro_process.wait(timeout=5)
+                except _sp.TimeoutExpired:
+                    self._maestro_process.kill()
+
+            self.console.print("  [dim]Maestro Studio kapatildi[/dim]")
 
         except FileNotFoundError:
             self.console.print(f"  [red]Maestro bulunamadi: {maestro_bin}[/red]")
