@@ -110,7 +110,9 @@ class NazarShell:
 
     def _show_header(self, welcome=False):
         """Banner goster (sadece acilista veya /clear'da)."""
-        self.console.clear()
+        import sys
+        sys.stdout.write('\x1Bc')
+        sys.stdout.flush()
         from nazar import __version__
         width = self.console.width or 80
 
