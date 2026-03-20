@@ -343,6 +343,9 @@ class NazarShell:
         # Faz 3: Calistirma - CANLI IZLEME
         self.console.print(f"  [bold green][3/3][/bold green] Testler calistiriliyor...\n")
         orchestrator = TestOrchestrator(self.project_path, self.plan_data)
+        # OPT 2 - Scanner cache'ini orchestrator'a aktar (ayni dosyalar tekrar okunmasin)
+        orchestrator._content_cache = scanner._content_cache
+        orchestrator._source_cache = scan_result.source_files
         tests = self.plan_data.get("tests", [])
         self.results = []
         passed = 0

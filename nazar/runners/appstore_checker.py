@@ -525,21 +525,38 @@ class AppStoreChecker(BaseRunner):
         return True, "Temiz"
 
     def check_uiwebview_deprecated(self, t: dict) -> Tuple[bool, str]:
-        """UIWebView kullanimi - 2020'den beri RED sebebi (node_modules dahil)."""
+        """UIWebView kullanimi - 2020'den beri RED sebebi."""
         found = []
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {".git", "build", "dist", ".expo"}]
-            for f in files:
-                if f.endswith((".m", ".h", ".mm")):
-                    fp = os.path.join(rd, f)
-                    try:
-                        content = Path(fp).read_text(errors="ignore")
-                        uiwebview = "UIWeb" + "View"
-                        if uiwebview in content:
-                            rel = os.path.relpath(fp, self.root)
-                            found.append(rel)
-                    except Exception:
-                        pass
+        uiwebview = "UIWeb" + "View"
+        # Sadece ios/ ve Pods/ altinda ObjC dosyalarini tara (node_modules cok buyuk)
+        search_dirs = [self.root / "ios", self.root / "Pods", self.root / "macos"]
+        for search_dir in search_dirs:
+            if not search_dir.exists():
+                continue
+            for rd, dirs, files in os.walk(search_dir):
+                dirs[:] = [d for d in dirs if d not in {".git", "build", "DerivedData"}]
+                for f in files:
+                    if f.endswith((".m", ".h", ".mm")):
+                        fp = os.path.join(rd, f)
+                        try:
+                            content = Path(fp).read_text(errors="ignore")
+                            if uiwebview in content:
+                                found.append(os.path.relpath(fp, self.root))
+                                if len(found) >= 5:
+                                    break
+                        except Exception:
+                            pass
+                if len(found) >= 5:
+                    break
+        # Ayrica src dosyalarinda da ara (cache'li, hizli)
+        for rel, full in self._all_files():
+            if rel.endswith((".m", ".h", ".mm", ".swift")):
+                try:
+                    content = Path(full).read_text(errors="ignore")
+                    if uiwebview in content and rel not in found:
+                        found.append(rel)
+                except Exception:
+                    pass
         if found:
             return False, f"{len(found)} dosyada UIWebView: {found[0]} - 2020'den beri RED sebebi"
         return True, "UIWebView kullanimi yok"

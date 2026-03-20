@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from nazar.scanner.patterns import (
     IGNORE_DIRS, TECH_MARKERS, API_PATTERNS, TEST_PATTERNS,
@@ -48,17 +49,42 @@ class ScanResult:
         return asdict(self)
 
 
+# OPT 5 - Pre-compile base_url patterns at module level
+_BASE_URL_PATTERNS = [
+    re.compile(r"""(?:BASE_URL|API_URL|BACKEND_URL)\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]"""),
+    re.compile(r"""baseURL\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]"""),
+]
+
+
 class ProjectScanner:
     def __init__(self, project_path: str):
         self.root = Path(project_path).resolve()
         self.result = ScanResult()
+        # OPT 2 - Content cache: dosya iceriklerini bir kez oku, tekrar kullan
+        self._content_cache: Dict[str, str] = {}
+
+    # OPT 2 - Cached file read
+    def _read_file(self, rel_path: str) -> str:
+        """Dosya oku ve cache'le. Ayni dosya iki kez okunmaz."""
+        if rel_path in self._content_cache:
+            return self._content_cache[rel_path]
+        try:
+            target = (self.root / rel_path).resolve()
+            if not str(target).startswith(str(self.root)):
+                return ""
+            content = target.read_text(errors="ignore")
+            if len(content) < 500_000:
+                self._content_cache[rel_path] = content
+            return content
+        except Exception:
+            return ""
 
     def scan(self) -> ScanResult:
         self.result.project_name = self.root.name
         self._detect_tech_stack()
         self._collect_source_files()
-        self._find_screens()
-        self._find_api_endpoints()
+        # OPT 1 - Merged: screens + endpoints tek geciste, paralel
+        self._find_screens_and_endpoints()
         self._find_test_files()
         self._detect_state_management()
         self._detect_navigation()
@@ -67,6 +93,7 @@ class ProjectScanner:
         self._find_config_files()
         return self.result
 
+    # OPT 3 - Tech stack detection with cached file reads
     def _detect_tech_stack(self):
         self._read_dependencies()
         for tech, markers in TECH_MARKERS.items():
@@ -78,7 +105,9 @@ class ProjectScanner:
                 else:
                     path = self.root / marker_file
                     if path.exists():
-                        if keyword is None or keyword in path.read_text(errors="ignore"):
+                        # OPT 3 - cached read instead of raw read_text
+                        content = self._read_file(marker_file)
+                        if keyword is None or keyword in content:
                             self.result.tech_stack = tech
                             break
             if self.result.tech_stack != "unknown":
@@ -89,7 +118,8 @@ class ProjectScanner:
         pkg = self.root / "package.json"
         if pkg.exists():
             try:
-                data = json.loads(pkg.read_text())
+                # OPT 3 - cached read
+                data = json.loads(self._read_file("package.json"))
                 self.result.dependencies = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
             except json.JSONDecodeError:
                 pass
@@ -98,7 +128,7 @@ class ProjectScanner:
         if pubspec.exists():
             try:
                 import yaml
-                data = yaml.safe_load(pubspec.read_text())
+                data = yaml.safe_load(self._read_file("pubspec.yaml"))
                 if data and "dependencies" in data:
                     self.result.dependencies = {k: str(v) for k, v in data["dependencies"].items()}
             except Exception:
@@ -107,81 +137,129 @@ class ProjectScanner:
         for req_file in ["requirements.txt", "pyproject.toml"]:
             path = self.root / req_file
             if path.exists():
-                for line in path.read_text(errors="ignore").splitlines():
+                # OPT 3 - cached read
+                content = self._read_file(req_file)
+                for line in content.splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and not line.startswith("["):
                         name = re.split(r"[><=!~\[]", line, 1)[0].strip().strip('"')
                         if name:
                             self.result.dependencies[name] = ""
 
+    # OPT 4 - os.scandir instead of os.walk
     def _collect_source_files(self):
         found_langs = set()
-        for root_dir, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-            for f in files:
-                ext = Path(f).suffix.lower()
-                if ext in SOURCE_EXTS:
-                    rel = os.path.relpath(os.path.join(root_dir, f), self.root)
-                    self.result.source_files.append(rel)
-                    if ext in EXT_TO_LANG:
-                        found_langs.add(EXT_TO_LANG[ext])
+        self._scandir_recursive(self.root, found_langs)
         self.result.languages = sorted(found_langs)
 
-    def _find_screens(self):
-        patterns = SCREEN_PATTERNS.get(self.result.tech_stack, SCREEN_PATTERNS["generic"])
-        compiled = [(re.compile(p), ct) for p, ct in patterns]
-        seen = set()
-        # Sadece UI dosyalarini tara (test ve config haric, max 200)
-        ui_exts = {".tsx", ".jsx", ".ts", ".js", ".dart", ".swift", ".kt", ".vue", ".svelte"}
-        ui_files = [f for f in self.result.source_files if Path(f).suffix.lower() in ui_exts and "test" not in f.lower()][:200]
-        for src_file in ui_files:
-            try:
-                content = (self.root / src_file).read_text(errors="ignore")
-                if len(content) > 200_000:
-                    continue
-            except Exception:
-                continue
-            for compiled_pat, comp_type in compiled:
-                for match in compiled_pat.finditer(content):
-                    name = match.group(1)
-                    key = f"{name}:{src_file}"
-                    if name and len(name) > 1 and not name.startswith("_") and key not in seen:
-                        seen.add(key)
-                        self.result.screens.append({"name": name, "file": src_file, "type": comp_type})
-
-    def _find_api_endpoints(self):
-        seen = set()
-        # Max 150 dosya tara, test haric
-        api_files = [f for f in self.result.source_files if "test" not in f.lower()][:150]
-        for src_file in api_files:
-            ext = Path(src_file).suffix.lower()
-            lang = EXT_TO_API_LANG.get(ext)
-            if not lang or lang not in API_PATTERNS:
-                continue
-            try:
-                content = (self.root / src_file).read_text(errors="ignore")
-                if len(content) > 200_000:
-                    continue
-            except Exception:
-                continue
-            for pattern, default_method in API_PATTERNS[lang]:
-                for match in re.finditer(pattern, content, re.DOTALL):
-                    groups = match.groups()
-                    if len(groups) == 2 and default_method is None:
-                        method, url = groups[0].upper(), groups[1]
-                    elif len(groups) == 1:
-                        method, url = (default_method or "GET"), groups[0]
-                    else:
+    def _scandir_recursive(self, directory: Path, found_langs: set):
+        """OPT 4 - Recursive os.scandir, os.walk yerine daha hizli."""
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in IGNORE_DIRS:
+                                self._scandir_recursive(Path(entry.path), found_langs)
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext in SOURCE_EXTS:
+                                rel = os.path.relpath(entry.path, self.root)
+                                self.result.source_files.append(rel)
+                                if ext in EXT_TO_LANG:
+                                    found_langs.add(EXT_TO_LANG[ext])
+                    except PermissionError:
                         continue
-                    key = f"{method}:{url}"
-                    if url and len(url) > 1 and key not in seen:
-                        seen.add(key)
-                        self.result.api_endpoints.append({"method": method, "url": url, "file": src_file})
+        except PermissionError:
+            pass
+
+    # OPT 1 - Merged parallel scan: screens + endpoints tek geciste
+    def _find_screens_and_endpoints(self):
+        """Ekran ve API endpoint tespitini tek paralel geciste yapar."""
+        # OPT 5 - Pre-compile all screen patterns
+        screen_pats = SCREEN_PATTERNS.get(self.result.tech_stack, SCREEN_PATTERNS["generic"])
+        compiled_screen = [(re.compile(p), ct) for p, ct in screen_pats]
+
+        # OPT 5 - Pre-compile all API patterns per language
+        compiled_api: Dict[str, list] = {}
+        for lang, patterns in API_PATTERNS.items():
+            compiled_api[lang] = [(re.compile(p, re.DOTALL), dm) for p, dm in patterns]
+
+        # UI dosyalari (screen tespiti icin)
+        ui_exts = {".tsx", ".jsx", ".ts", ".js", ".dart", ".swift", ".kt", ".vue", ".svelte"}
+
+        # Taranacak dosyalari belirle: test dosyalari haric, max 200
+        scan_files = [f for f in self.result.source_files if "test" not in f.lower()][:200]
+
+        seen_screens = set()
+        seen_endpoints = set()
+        all_screens = []
+        all_endpoints = []
+
+        def process_file(src_file: str):
+            """Tek dosyayi oku, hem screen hem endpoint cikar."""
+            file_screens = []
+            file_endpoints = []
+
+            # OPT 2 - cached read
+            content = self._read_file(src_file)
+            if not content or len(content) > 200_000:
+                return file_screens, file_endpoints
+
+            ext = os.path.splitext(src_file)[1].lower()
+
+            # Screen detection (sadece UI dosyalari icin)
+            if ext in ui_exts:
+                for compiled_pat, comp_type in compiled_screen:
+                    for match in compiled_pat.finditer(content):
+                        name = match.group(1)
+                        key = f"{name}:{src_file}"
+                        if name and len(name) > 1 and not name.startswith("_"):
+                            file_screens.append((key, {"name": name, "file": src_file, "type": comp_type}))
+
+            # API endpoint detection
+            lang = EXT_TO_API_LANG.get(ext)
+            if lang and lang in compiled_api:
+                for compiled_pat, default_method in compiled_api[lang]:
+                    for match in compiled_pat.finditer(content):
+                        groups = match.groups()
+                        if len(groups) == 2 and default_method is None:
+                            method, url = groups[0].upper(), groups[1]
+                        elif len(groups) == 1:
+                            method, url = (default_method or "GET"), groups[0]
+                        else:
+                            continue
+                        ep_key = f"{method}:{url}"
+                        if url and len(url) > 1:
+                            file_endpoints.append((ep_key, {"method": method, "url": url, "file": src_file}))
+
+            return file_screens, file_endpoints
+
+        # OPT 1 - ThreadPoolExecutor ile paralel dosya okuma
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(process_file, f): f for f in scan_files}
+            for future in as_completed(futures):
+                try:
+                    file_screens, file_endpoints = future.result()
+                    for key, screen in file_screens:
+                        if key not in seen_screens:
+                            seen_screens.add(key)
+                            all_screens.append(screen)
+                    for key, endpoint in file_endpoints:
+                        if key not in seen_endpoints:
+                            seen_endpoints.add(key)
+                            all_endpoints.append(endpoint)
+                except Exception:
+                    continue
+
+        self.result.screens = all_screens
+        self.result.api_endpoints = all_endpoints
 
     def _find_test_files(self):
+        compiled_test = [re.compile(p) for p in TEST_PATTERNS]
         for src_file in self.result.source_files:
             filename = os.path.basename(src_file).lower()
-            if any(re.match(p, filename) for p in TEST_PATTERNS):
+            if any(pat.match(filename) for pat in compiled_test):
                 self.result.test_files.append(src_file)
 
     def _detect_state_management(self):
@@ -198,17 +276,26 @@ class ProjectScanner:
                 self.result.navigation_lib = lib_name
                 return
 
+    # OPT 5 - Pre-compiled base_url patterns (module-level _BASE_URL_PATTERNS)
     def _detect_base_url(self):
-        patterns = [
-            r"""(?:BASE_URL|API_URL|BACKEND_URL)\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]""",
-            r"""baseURL\s*[:=]\s*[`'"](https?://[^`'"]+)[`'"]""",
-        ]
-        search_files = list(self.root.glob(".env*")) + [self.root / f for f in self.result.source_files[:30]]
-        for path in search_files:
+        search_files = []
+        # .env dosyalari
+        for env_path in self.root.glob(".env*"):
             try:
-                content = path.read_text(errors="ignore")
-                for p in patterns:
-                    match = re.search(p, content)
+                rel = os.path.relpath(env_path, self.root)
+                search_files.append(rel)
+            except Exception:
+                pass
+        # Ilk 30 kaynak dosya
+        search_files.extend(self.result.source_files[:30])
+
+        for rel_path in search_files:
+            try:
+                # OPT 2 - cached read
+                content = self._read_file(rel_path)
+                # OPT 5 - pre-compiled patterns
+                for compiled_pat in _BASE_URL_PATTERNS:
+                    match = compiled_pat.search(content)
                     if match:
                         self.result.base_url = match.group(1)
                         return
