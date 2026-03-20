@@ -154,6 +154,10 @@ class TestPlanner:
         if self._has_ui and self._should_run("responsive"):
             self._plan_responsive_tests()
 
+        # Visual Regression
+        if self._should_run("visual_regression"):
+            self._plan_visual_regression_tests()
+
         # Performance Static
         if self._should_run("perf_static"):
             self._plan_perf_static_tests()
@@ -589,6 +593,11 @@ class TestPlanner:
         """Derin i18n analizi."""
         tests = [
             {"name": "I18N: Hardcoded string ve i18n kapsami", "type": "i18n_deep", "subtype": "i18n_deep", "priority": "medium"},
+            {"name": "I18N: Detayli coverage analizi", "type": "i18n_deep", "subtype": "i18n_coverage", "priority": "medium"},
+            {"name": "I18N: Eksik translation key tespiti", "type": "i18n_deep", "subtype": "missing_translation_keys", "priority": "high"},
+            {"name": "I18N: Kullanilmayan translation key tespiti", "type": "i18n_deep", "subtype": "unused_translation_keys", "priority": "low"},
+            {"name": "I18N: Locale dosyasi tutarliligi", "type": "i18n_deep", "subtype": "locale_consistency", "priority": "high"},
+            {"name": "I18N: RTL (sag-sola) dil destegi", "type": "i18n_deep", "subtype": "rtl_support", "priority": "medium"},
         ]
         self._add_category("i18n Analysis", tests, "medium")
 
@@ -598,8 +607,41 @@ class TestPlanner:
             {"name": "RESPONSIVE: Sabit pixel boyutlari", "type": "responsive", "subtype": "fixed_dimensions", "priority": "medium"},
             {"name": "RESPONSIVE: ScrollView icinde FlatList", "type": "responsive", "subtype": "scroll_issues", "priority": "high"},
             {"name": "RESPONSIVE: Responsive pattern kontrolu", "type": "responsive", "subtype": "responsive_patterns", "priority": "low"},
+            {"name": "RESPONSIVE: Media query breakpoint analizi", "type": "responsive", "subtype": "media_query_analysis", "priority": "high"},
+            {"name": "RESPONSIVE: Viewport meta tag kontrolu", "type": "responsive", "subtype": "viewport_meta", "priority": "high"},
+            {"name": "RESPONSIVE: Dokunma hedefi boyutu (min 44px)", "type": "responsive", "subtype": "touch_target_size", "priority": "medium"},
+            {"name": "RESPONSIVE: Flexbox/Grid layout kullanimi", "type": "responsive", "subtype": "flexbox_grid_usage", "priority": "medium"},
+            {"name": "RESPONSIVE: Responsive gorsel (srcset/picture)", "type": "responsive", "subtype": "responsive_images", "priority": "medium"},
         ]
         self._add_category("Responsive", tests, "medium")
+
+    def _plan_visual_regression_tests(self):
+        """Visual regression / snapshot test analizi."""
+        # Sadece test dosyalari olan projelerde calistir
+        has_test_infra = False
+        for f in self.scan.source_files:
+            fl = f.lower()
+            if "__tests__" in fl or "__snapshots__" in fl or "jest" in fl or "vitest" in fl:
+                has_test_infra = True
+                break
+        if not has_test_infra:
+            # jest/vitest config dosyalarini da kontrol et
+            for cfg in self.scan.config_files:
+                cl = cfg.lower()
+                if "jest" in cl or "vitest" in cl:
+                    has_test_infra = True
+                    break
+        if not has_test_infra:
+            return
+        tests = [
+            {"name": "VISUAL-REG: Stale (eski) snapshot tespiti", "type": "visual_regression", "subtype": "stale_snapshots", "priority": "medium"},
+            {"name": "VISUAL-REG: Eksik snapshot dosyalari", "type": "visual_regression", "subtype": "missing_snapshots", "priority": "high"},
+            {"name": "VISUAL-REG: Snapshot isimlendirme kontrolu", "type": "visual_regression", "subtype": "snapshot_naming", "priority": "low"},
+            {"name": "VISUAL-REG: Buyuk snapshot dosyalari", "type": "visual_regression", "subtype": "large_snapshots", "priority": "medium"},
+            {"name": "VISUAL-REG: Commit edilmemis snapshot degisiklikleri", "type": "visual_regression", "subtype": "uncommitted_snapshots", "priority": "high"},
+            {"name": "VISUAL-REG: Snapshot dizin yapisi kontrolu", "type": "visual_regression", "subtype": "snapshot_directory_check", "priority": "low"},
+        ]
+        self._add_category("Visual Regression", tests, "medium")
 
     def _plan_perf_static_tests(self):
         """Statik performans analizi."""

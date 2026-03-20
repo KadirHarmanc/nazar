@@ -101,8 +101,6 @@ CONFIDENCE_SCORES = {
     "maintainability_index": 80,
     "dead_code": 60,
     "mutable_default": 90,
-    "bare_except": 90,
-    "global_usage": 80,
     "star_import": 85,
     "loose_equality": 75,
     "var_usage": 50,  # Swift uses var legitimately
@@ -197,7 +195,6 @@ CONFIDENCE_SCORES = {
     "mutable_defaults": 95,
     "hardcoded_secrets": 92,
     "star_imports": 90,
-    "global_usage": 80,
 
     # Taint Tracking
     "sql_injection_taint": 90,
@@ -222,11 +219,21 @@ CONFIDENCE_SCORES = {
 
     # i18n Deep
     "i18n_deep": 70,
+    "i18n_coverage": 75,
+    "missing_translation_keys": 90,
+    "unused_translation_keys": 80,
+    "locale_consistency": 95,
+    "rtl_support": 70,
 
     # Responsive
     "fixed_dimensions": 75,
     "scroll_issues": 90,
     "responsive_patterns": 65,
+    "media_query_analysis": 80,
+    "viewport_meta": 90,
+    "responsive_touch_target": 75,
+    "flexbox_grid_usage": 70,
+    "responsive_images": 75,
 
     # Performance Static
     "large_assets": 95,
@@ -249,7 +256,7 @@ CONFIDENCE_SCORES = {
     "content_quality": 92,
     "loading_state": 75,
     "error_state": 75,
-    "empty_state": 70,
+    "ui_empty_state": 70,
 
     # Eksik confidence skorlari (checker2 tarafindan tespit edildi)
     "undefined_vars": 70,
@@ -261,6 +268,14 @@ CONFIDENCE_SCORES = {
     "yaml_security": 80,
     "yaml_code_quality": 70,
     "yaml_custom": 75,
+
+    # Visual Regression
+    "stale_snapshots": 80,
+    "missing_snapshots": 75,
+    "snapshot_naming": 60,
+    "large_snapshots": 85,
+    "uncommitted_snapshots": 90,
+    "snapshot_directory_check": 70,
 
     # Play Store
     "target_sdk": 95,

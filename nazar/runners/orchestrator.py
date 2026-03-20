@@ -29,6 +29,7 @@ from nazar.analyzers.yaml_ui_runner import YAMLUITestRunner
 from nazar.analyzers.i18n_analyzer import I18nAnalyzer
 from nazar.analyzers.responsive_analyzer import ResponsiveAnalyzer
 from nazar.analyzers.performance_analyzer import PerformanceStaticAnalyzer
+from nazar.analyzers.visual_regression import VisualRegressionAnalyzer
 
 # "How to Fix" mesajlari
 HOW_TO_FIX = {
@@ -158,6 +159,108 @@ HOW_TO_FIX = {
         "sorun": "Kod obfuscation (R8/ProGuard) aktif degil",
         "cozum": "Release build'de minifyEnabled=true yapin",
         "quick_fix": "build.gradle > release > minifyEnabled true",
+    },
+    "i18n_deep": {
+        "sorun": "UI'da hardcoded string'ler var, i18n kapsami dusuk",
+        "cozum": "Tum UI string'lerini i18n sistemiyle yonetin (i18next, react-intl vb.)",
+        "quick_fix": "npm install i18next react-i18next && t('key') seklinde kullanin",
+    },
+    "i18n_coverage": {
+        "sorun": "i18n coverage yetersiz, bircok string hala hardcoded",
+        "cozum": "Her UI string'ini translation dosyasina ekleyin ve t() ile cagirin",
+        "quick_fix": "Hardcoded string'leri grep ile bulun ve locale dosyasina ekleyin",
+    },
+    "missing_translation_keys": {
+        "sorun": "Kodda kullanilan translation key'leri locale dosyalarinda eksik",
+        "cozum": "Eksik key'leri tum locale dosyalarina ekleyin",
+        "quick_fix": "Eksik key'leri en.json/tr.json gibi dosyalara ekleyin",
+    },
+    "unused_translation_keys": {
+        "sorun": "Locale dosyalarinda tanimli ama kodda kullanilmayan key'ler var",
+        "cozum": "Kullanilmayan key'leri temizleyin, bundle boyutunu kucultin",
+        "quick_fix": "Kullanilmayan key'leri locale JSON dosyalarindan silin",
+    },
+    "locale_consistency": {
+        "sorun": "Locale dosyalari arasinda key tutarsizligi var",
+        "cozum": "Tum locale dosyalarinin ayni key setine sahip olmasini saglayin",
+        "quick_fix": "Referans locale'deki eksik key'leri diger locale'lere ekleyin",
+    },
+    "rtl_support": {
+        "sorun": "RTL (Arapca/Ibranice) locale var ama RTL destegi eksik",
+        "cozum": "I18nManager.isRTL kontrolu ekleyin, marginStart/End kullanin",
+        "quick_fix": "import { I18nManager } from 'react-native' ve direction kontrolleri ekleyin",
+    },
+    # Responsive - Faz 5
+    "fixed_dimensions": {
+        "sorun": "Sabit pixel boyutlari responsive degil",
+        "cozum": "Sabit px yerine %, vw/vh, rem veya flex kullanin",
+        "quick_fix": "width: 300px yerine width: 100% veya max-width kullanin",
+    },
+    "scroll_issues": {
+        "sorun": "ScrollView icinde FlatList/SectionList performans sorunu",
+        "cozum": "ScrollView icindeki FlatList'i cikarip tek FlatList kullanin",
+        "quick_fix": "FlatList'in ListHeaderComponent prop'unu kullanin",
+    },
+    "responsive_patterns": {
+        "sorun": "Eski responsive pattern'ler kullaniliyor",
+        "cozum": "Dimensions.get yerine useWindowDimensions hook'u kullanin",
+        "quick_fix": "const { width, height } = useWindowDimensions()",
+    },
+    "media_query_analysis": {
+        "sorun": "Media query breakpoint'leri eksik veya yetersiz",
+        "cozum": "Mobil, tablet ve desktop icin uygun breakpoint'ler tanimlayin",
+        "quick_fix": "@media (min-width: 768px) ve @media (min-width: 1024px) ekleyin",
+    },
+    "viewport_meta": {
+        "sorun": "Viewport meta tag eksik veya yanlis yapilandirilmis",
+        "cozum": "HTML <head> icine dogru viewport meta tag ekleyin",
+        "quick_fix": '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
+    },
+    "touch_target_size": {
+        "sorun": "Dokunma hedefleri cok kucuk (44x44px altinda)",
+        "cozum": "Interaktif elementlerin min boyutunu 44x44px yapin (WCAG 2.5.5)",
+        "quick_fix": "min-width: 44px; min-height: 44px ekleyin",
+    },
+    "flexbox_grid_usage": {
+        "sorun": "Modern esnek layout (flexbox/grid) kullanilmiyor",
+        "cozum": "Float ve absolute yerine flexbox veya CSS Grid kullanin",
+        "quick_fix": "display: flex veya display: grid ile layout olusturun",
+    },
+    "responsive_images": {
+        "sorun": "Gorseller responsive optimize degil",
+        "cozum": "srcset, sizes ve <picture> elementi ile farkli ekran boyutlarina uygun gorseller sunun",
+        "quick_fix": '<img srcset="img-480.jpg 480w, img-800.jpg 800w" sizes="(max-width: 600px) 480px, 800px">',
+    },
+    # Visual Regression
+    "stale_snapshots": {
+        "sorun": "Eski/guncelligin yitirmis snapshot dosyalari var",
+        "cozum": "Snapshot'lari guncelleyin veya artik kullanilmayanlari silin",
+        "quick_fix": "npx jest --updateSnapshot veya npx vitest --update",
+    },
+    "missing_snapshots": {
+        "sorun": "Test dosyalari icin snapshot dosyasi eksik",
+        "cozum": "Eksik snapshot'lari olusturun: testleri calistirin ve snapshot'lari commit edin",
+        "quick_fix": "npx jest --updateSnapshot && git add __snapshots__/",
+    },
+    "snapshot_naming": {
+        "sorun": "Snapshot dosya isimlendirmesi tutarsiz veya yanlis",
+        "cozum": "Snapshot dosyalarini test dosyasiyla ayni adda .snap uzantili yapin",
+        "quick_fix": "ComponentName.test.tsx -> ComponentName.test.tsx.snap seklinde eslestirin",
+    },
+    "large_snapshots": {
+        "sorun": "Snapshot dosyalari cok buyuk (review zorlasiyor)",
+        "cozum": "Buyuk snapshot'lari kucuk, odakli component snapshot'larina bolerek kuculte",
+        "quick_fix": "toMatchInlineSnapshot() veya daha spesifik selector ile snapshot alin",
+    },
+    "uncommitted_snapshots": {
+        "sorun": "Snapshot degisiklikleri commit edilmemis",
+        "cozum": "Degisen snapshot'lari review edip commit edin",
+        "quick_fix": "git add **/__snapshots__/ && git commit -m 'update snapshots'",
+    },
+    "snapshot_directory_check": {
+        "sorun": "Snapshot dizin yapisi standart degil veya dagnik",
+        "cozum": "__snapshots__ dizinini test dosyalarinin yanina yerlestirin",
+        "quick_fix": "Her __tests__ dizininin icine bir __snapshots__ dizini olusturun",
     },
 }
 
@@ -342,6 +445,12 @@ class TestOrchestrator(BaseRunner):
             self._playstore_checker = self._share_cache(PlayStoreChecker(str(self.root)))
         return self._playstore_checker
 
+    @property
+    def visual_regression(self) -> VisualRegressionAnalyzer:
+        if not hasattr(self, '_visual_regression') or self._visual_regression is None:
+            self._visual_regression = self._share_cache(VisualRegressionAnalyzer(str(self.root)))
+        return self._visual_regression
+
     def run_all(self) -> List[Dict]:
         for test in self.plan.get("tests", []):
             self.results.append(self._run_test(test))
@@ -408,6 +517,7 @@ class TestOrchestrator(BaseRunner):
                 "i18n_deep": self._i18n_deep,
                 "responsive": self._responsive,
                 "perf_static": self._run_perf_static,
+                "visual_regression": self._visual_regression_check,
             }
             fn = runner_map.get(t)
             passed, detail = fn(test) if fn else (True, "SKIP")
@@ -1080,6 +1190,10 @@ class TestOrchestrator(BaseRunner):
     def _visual(self, t: dict) -> Tuple[bool, str]:
         f = t.get("file", "")
         return (self.root / f).exists(), f"Mevcut" if (self.root / f).exists() else "Yok"
+
+    # ---- Visual Regression ----
+    def _visual_regression_check(self, t: dict) -> Tuple[bool, str]:
+        return self.visual_regression.run_check(t.get("subtype", ""), t)
 
     # ---- Docker ----
     def _docker(self, t: dict) -> Tuple[bool, str]:
