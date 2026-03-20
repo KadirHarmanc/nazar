@@ -45,6 +45,7 @@ HELP_TEXT = """
   [cyan]categories[/cyan]    [dim]|[/dim] [cyan]cat[/cyan]         Kategori listesi
   [cyan]stats[/cyan]                        Genel istatistikler
   [cyan]profiles[/cyan]      [dim]|[/dim] [cyan]profiller[/cyan]   Test profilleri
+  [cyan]live[/cyan]          [dim]|[/dim] [cyan]serve[/cyan]       Canli web raporu (localhost:5555)
   [cyan]update[/cyan]        [dim]|[/dim] [cyan]guncelle[/cyan]    Son versiyona guncelle
   [cyan]clear[/cyan]         [dim]|[/dim] [cyan]temizle[/cyan]     Ekrani temizle
   [cyan]help[/cyan]          [dim]|[/dim] [cyan]yardim[/cyan]      Bu ekran
@@ -58,7 +59,7 @@ HELP_TEXT = """
 
 
 class NazarCompleter(Completer):
-    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "help", "quit",
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "help", "quit",
                 "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "yardim", "cikis", "cat"]
     FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
     FORMATS = ["html", "json", "sarif", "junit", "markdown"]
@@ -167,6 +168,7 @@ class NazarShell:
             "categories": self._categories, "kategoriler": self._categories, "c": self._categories, "cat": self._categories,
             "profiles": self._profiles, "profiller": self._profiles,
             "stats": self._stats, "istatistik": self._stats,
+            "live": self._live, "serve": self._live,
             "clear": self._clear, "temizle": self._clear,
             "update": self._update, "guncelle": self._update,
             "help": lambda: self.console.print(HELP_TEXT), "yardim": lambda: self.console.print(HELP_TEXT), "h": lambda: self.console.print(HELP_TEXT),
@@ -282,14 +284,42 @@ class NazarShell:
         scan_dur = time.time() - scan_start
         self.console.print(f"  [bold cyan][1/3][/bold cyan] Proje tarandi [green]{scan_result.tech_stack}[/green] | {scan_result.screen_count} ekran | {scan_result.api_endpoint_count} API | {len(scan_result.source_files)} dosya [dim]({scan_dur:.1f}s)[/dim]")
 
+        # Incremental mod: sadece degisen dosyalari tara
+        incremental_files = None
+        is_diff_mode = False
+        if profile == "incremental":
+            changed, new, deleted = cache.get_changed_files(scan_result.source_files)
+            all_changed = changed + new
+            self.console.print(f"\n  [bold cyan]Incremental:[/bold cyan] {len(changed)} degisen, {len(new)} yeni, {len(deleted)} silinen dosya")
+            if not all_changed:
+                self.console.print("  [green]Degisiklik tespit edilemedi, tarama atlaniyor.[/green]")
+                prev_summary = cache.get_last_scan_summary()
+                if prev_summary:
+                    self.console.print(f"  [dim]Son tarama: {prev_summary['grade']} ({prev_summary['pass_rate']}%)[/dim]")
+                self.console.print(f"\n[dim]Degisiklik yapip tekrar deneyin.[/dim]\n")
+                return
+            self.console.print(f"  [yellow]{len(all_changed)} dosya icin testler calistirilacak[/yellow]")
+            incremental_files = all_changed
+        elif profile == "diff":
+            is_diff_mode = True
+
         # Faz 2: Planlama (secilen profil ile)
         plan_start = time.time()
-        plan_profile = profile if profile not in ("incremental", "diff") else "full"
+        plan_profile = "full" if profile in ("incremental", "diff") else profile
         planner = TestPlanner(scan_result, profile=plan_profile)
         plan = planner.create_plan()
         self.plan_data = plan.to_dict()
+
+        # Incremental modda: plani degisen dosyalara gore filtrele
+        if incremental_files is not None:
+            self.plan_data = self._filter_plan_by_changed_files(self.plan_data, incremental_files)
+
         plan_dur = time.time() - plan_start
-        self.console.print(f"  [bold yellow][2/3][/bold yellow] {plan.total_tests} test planlanidi ({len(plan.categories)} kategori) [dim]({plan_dur:.1f}s)[/dim]")
+        total_test_count = len(self.plan_data.get("tests", []))
+        if incremental_files is not None:
+            self.console.print(f"  [bold yellow][2/3][/bold yellow] {total_test_count} test planlanidi (degisen dosyalar icin filtrelendi) [dim]({plan_dur:.1f}s)[/dim]")
+        else:
+            self.console.print(f"  [bold yellow][2/3][/bold yellow] {total_test_count} test planlanidi ({len(plan.categories)} kategori) [dim]({plan_dur:.1f}s)[/dim]")
 
         # Faz 3: Calistirma - CANLI IZLEME
         self.console.print(f"  [bold green][3/3][/bold green] Testler calistiriliyor...\n")
@@ -409,7 +439,16 @@ class NazarShell:
                                 if fut.done() and fut not in done_futures:
                                     done_futures.add(fut)
                                     idx_f, test_f = futures[fut]
-                                    result = fut.result()
+                                    try:
+                                        result = fut.result()
+                                    except Exception as exc:
+                                        result = {
+                                            "name": test_f.get("name", "unknown"),
+                                            "passed": False,
+                                            "type": test_f.get("type", "other"),
+                                            "priority": test_f.get("priority", "medium"),
+                                            "detail": f"Test calistirilirken hata: {exc}",
+                                        }
                                     self.results.append(result)
                                     tc = test_f.get("type", "other")
                                     if result["passed"]:
@@ -469,6 +508,39 @@ class NazarShell:
                 if r.get("how_to_fix"):
                     self.console.print(f"       [green]Fix:[/green] {r['how_to_fix'].get('quick_fix', '')}")
                 self.console.print()
+        # Diff modu: onceki taramayla karsilastir
+        if is_diff_mode and self.results:
+            diff_result = cache.compare_with_previous(self.results)
+            if diff_result:
+                self.console.print()
+                delta = diff_result["delta"]
+                delta_sign = "+" if delta > 0 else ""
+                delta_color = "green" if delta > 0 else "red" if delta < 0 else "dim"
+                self.console.print(Panel(
+                    f"[bold]Onceki:[/bold] {diff_result['previous_grade']} ({diff_result['previous_rate']}%)  "
+                    f"[bold]Simdi:[/bold] {diff_result['current_grade']} ({diff_result['current_rate']}%)  "
+                    f"[{delta_color}]{delta_sign}{delta}%[/{delta_color}]\n"
+                    f"[green]{diff_result['fixed_count']} duzeltildi[/green]  |  "
+                    f"[red]{diff_result['new_issues_count']} yeni sorun[/red]  |  "
+                    f"[dim]{diff_result.get('time_since', '?')}[/dim]",
+                    title="[bold yellow]KARSILASTIRMA[/bold yellow]", border_style="yellow",
+                ))
+                if diff_result["fixed"]:
+                    self.console.print("  [green]Duzeltilen:[/green]")
+                    for item in diff_result["fixed"][:5]:
+                        self.console.print(f"    [green]+[/green] {item['name']}")
+                if diff_result["new_issues"]:
+                    self.console.print("  [red]Yeni sorunlar:[/red]")
+                    for item in diff_result["new_issues"][:5]:
+                        self.console.print(f"    [red]-[/red] {item['name']}")
+            else:
+                self.console.print("\n  [yellow]Onceki tarama bulunamadi, karsilastirma yapilamadi.[/yellow]")
+
+        # Scan cache kaydet
+        if self.results:
+            cache.save_scan_result(self.results, self.plan_data, profile, total_dur)
+            cache.save_file_hashes(scan_result.source_files)
+
         self.console.print(f"[dim]d <no>: daha fazla detay | g <no>: rehber | r: tablo | e html: export[/dim]")
 
     def _report(self, filt):
@@ -685,6 +757,38 @@ class NazarShell:
         self.console.print(table)
 
     # === Profil Secim Sistemi ===
+
+    @staticmethod
+    def _filter_plan_by_changed_files(plan_dict: dict, changed_files: list) -> dict:
+        """Test planini degisen dosyalara gore filtrele.
+
+        Target alani degisen dosyalardan biriyle eslesen testleri tut.
+        Target alani olmayan (genel) testleri de dahil et.
+        """
+        filtered = dict(plan_dict)
+        tests = plan_dict.get("tests", [])
+        changed_set = set(changed_files)
+
+        kept = []
+        for test in tests:
+            target = test.get("target", "")
+            # Target yoksa veya bossa -> genel test, her zaman dahil et
+            if not target:
+                kept.append(test)
+                continue
+            # Target degisen dosyalardan biriyse dahil et
+            if target in changed_set:
+                kept.append(test)
+                continue
+            # Target bir dizin veya partial path olabilir, prefix eslestirme yap
+            for cf in changed_files:
+                if cf.startswith(target) or target.startswith(cf):
+                    kept.append(test)
+                    break
+
+        filtered["tests"] = kept
+        filtered["total_tests"] = len(kept)
+        return filtered
 
     def _select_profile(self, tech: str, prev_scan: dict) -> str:
         """Kullaniciya profil secim menusu goster."""
@@ -910,3 +1014,46 @@ class NazarShell:
             table.add_row("[bold]Son Tarama[/bold]", f"[bold]{self.project_path}[/bold]")
             table.add_row("Gecen/Kalan", f"[green]{p}[/green] / [red]{f}[/red]")
         self.console.print(table)
+
+    def _live(self):
+        """Canli web raporu baslat - son tarama sonuclarini localhost:5555'te goster."""
+        from nazar.live.server import NazarLiveServer
+
+        if self.results and self.project_path:
+            # Mevcut tarama sonuclarini kullan
+            server = NazarLiveServer(port=5555)
+            passed = sum(1 for r in self.results if r.get("passed"))
+            total = len(self.results)
+            rate = (passed / total * 100) if total > 0 else 0
+            grade = _grade(rate)
+            duration = 0.0
+            server.set_results(self.results, self.plan_data or {}, grade, duration)
+            server.set_status("done")
+        elif self.project_path:
+            # Cache'den oku
+            server = NazarLiveServer.from_cache(self.project_path, port=5555)
+            if not server._results:
+                self.console.print("[yellow]Tarama sonucu bulunamadi. Once tarama yapin.[/yellow]")
+                return
+        else:
+            self.console.print("[yellow]Once bir proje tarayin: scan <yol>[/yellow]")
+            return
+
+        server.start()
+        self.console.print(f"\n[cyan]Canli rapor baslatildi: http://localhost:5555[/cyan]")
+        self.console.print("[dim]Durdurmak icin 'stop' yazin veya Ctrl+C basin.[/dim]\n")
+
+        try:
+            while True:
+                try:
+                    cmd = self.session.prompt(HTML('<style fg="#06b6d4"><b>live</b></style><style fg="#475569">&gt; </style>'))
+                    cmd = cmd.strip().lower()
+                    if cmd in ("stop", "dur", "quit", "q", "exit"):
+                        break
+                except KeyboardInterrupt:
+                    break
+                except EOFError:
+                    break
+        finally:
+            server.stop()
+            self.console.print("[dim]Canli rapor durduruldu.[/dim]\n")

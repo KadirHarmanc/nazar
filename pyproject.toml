@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nazar"
-version = "5.1.0"
+version = "5.2.0"
 description = "Autonomous testing tool - scans your project, understands architecture, plans and runs tests"
 requires-python = ">=3.9"
 license = {text = "MIT"}

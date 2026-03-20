@@ -50,13 +50,16 @@ TEST_PROFILES = {
     },
     "ci": {
         "name": "CI/CD (hizli)",
-        "description": "Kritik testler, fail-fast, hizli",
+        "description": "Sadece critical/high oncelikli testler, fail-fast, hizli sonuc",
         "categories": [
-            "security", "sca", "git",
+            "security", "sca", "git", "taint", "ast_analysis",
         ],
+        "priority_filter": ["critical", "high"],
         "fail_fast": True,
         "timeout": 300,
         "estimated_minutes": 1,
+        "json_output": True,
+        "quiet": True,
     },
     "dependency": {
         "name": "Bagimlilik Analizi",
@@ -91,6 +94,35 @@ def get_profile_categories(name: str) -> List[str]:
     if cats == "__all__":
         return []  # bos liste = tum kategoriler
     return cats
+
+
+def get_profile_priority_filter(name: str) -> List[str]:
+    """Profilin priority filtresini getir. Bos liste = filtre yok."""
+    profile = TEST_PROFILES.get(name)
+    if not profile:
+        return []
+    return profile.get("priority_filter", [])
+
+
+def get_profile_fail_fast(name: str) -> bool:
+    """Profilin fail_fast ayarini getir."""
+    profile = TEST_PROFILES.get(name)
+    if not profile:
+        return False
+    return profile.get("fail_fast", False)
+
+
+def get_profile_defaults(name: str) -> dict:
+    """Profilin varsayilan cikti ayarlarini getir (json_output, quiet vb.)."""
+    profile = TEST_PROFILES.get(name)
+    if not profile:
+        return {}
+    defaults = {}
+    if profile.get("json_output"):
+        defaults["json_output"] = True
+    if profile.get("quiet"):
+        defaults["quiet"] = True
+    return defaults
 
 
 def list_profiles() -> List[dict]:

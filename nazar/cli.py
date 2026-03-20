@@ -1,11 +1,12 @@
 """Nazar CLI - Ana giris noktasi."""
+import sys
 import typer
 import random
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from typing import Optional
+from typing import Optional, List
 import json
 import time
 
@@ -14,6 +15,10 @@ from nazar.planner.test_planner import TestPlanner
 from nazar.runners.orchestrator import TestOrchestrator
 from nazar.reporter.html_reporter import HTMLReporter
 from nazar.tui.live_runner import LiveTestRunner
+from nazar.planner.profiles import get_profile_priority_filter
+
+# Severity seviyeleri: critical > high > medium > low
+SEVERITY_LEVELS = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
 DID_YOU_KNOW = [
     "nazar --json ile CI/CD pipeline'iniza entegre edin",
@@ -26,6 +31,8 @@ DID_YOU_KNOW = [
     "nazar auto --report rapor.html ile ozel rapor adi verin",
     "nazar init ile proje yapilandirma dosyasi olusturun",
     "Docker ile nazar'i container icinde calistirabilirsiniz",
+    "nazar auto . --ci ile hizli CI/CD taramasi yapin (exit 0/1)",
+    "nazar auto . --ci --fail-on critical ile sadece critical bulgularda fail verin",
 ]
 
 app = typer.Typer(
@@ -107,7 +114,6 @@ def _phase_report(results, plan_dict, report, json_output, quiet, show_ui, start
     """Faz 4: Sonuclari raporla."""
     passed = sum(1 for r in results if r["passed"])
     if json_output:
-        import sys
         from nazar.reporters.json_reporter import JSONReporter
         sys.stdout.write(JSONReporter().generate(results, plan_dict) + "\n")
         return
@@ -123,28 +129,115 @@ def _phase_report(results, plan_dict, report, json_output, quiet, show_ui, start
         console.print(f"Nazar: {passed}/{len(results)} passed ({pass_rate:.0f}%) - {report}")
 
 
-def _run_auto(path: Path, report: str, opts: dict):
-    """Auto komutu mantigi."""
+def _filter_plan_by_changed_files(plan_dict: dict, changed_files: list) -> dict:
+    """Test planini degisen dosyalara gore filtrele.
+
+    Target alani degisen dosyalardan biriyle eslesen testleri tut.
+    Target alani olmayan (genel) testleri de dahil et.
+    """
+    filtered = dict(plan_dict)
+    tests = plan_dict.get("tests", [])
+    changed_set = set(changed_files)
+
+    kept = []
+    for test in tests:
+        target = test.get("target", "")
+        # Target yoksa veya bossa -> genel test, her zaman dahil et
+        if not target:
+            kept.append(test)
+            continue
+        # Target degisen dosyalardan biriyse dahil et
+        if target in changed_set:
+            kept.append(test)
+            continue
+        # Target bir dizin veya partial path olabilir, prefix eslestirme yap
+        for cf in changed_files:
+            if cf.startswith(target) or target.startswith(cf):
+                kept.append(test)
+                break
+
+    filtered["tests"] = kept
+    # Toplam test sayisini guncelle
+    filtered["total_tests"] = len(kept)
+    return filtered
+
+
+def _has_findings_at_level(results: list, fail_on: str) -> bool:
+    """Belirtilen seviye ve ustunde basarisiz test var mi kontrol et.
+
+    fail_on="critical" -> sadece critical failed varsa True
+    fail_on="high"     -> critical veya high failed varsa True
+    fail_on="medium"   -> critical, high veya medium failed varsa True
+    fail_on="low"      -> herhangi bir failed varsa True
+    """
+    threshold = SEVERITY_LEVELS.get(fail_on, 2)  # varsayilan medium
+    for r in results:
+        if not r.get("passed", True):
+            result_priority = r.get("priority", "medium").lower()
+            result_level = SEVERITY_LEVELS.get(result_priority, 2)
+            if result_level >= threshold:
+                return True
+    return False
+
+
+def _run_auto(path: Path, report: str, opts: dict) -> list:
+    """Auto komutu mantigi. Sonuclari dondurur (CI exit code icin)."""
     quiet, json_output = opts.get("quiet", False), opts.get("json_output", False)
     profile = opts.get("profile", "full")
+    incremental = opts.get("incremental", False)
     show_ui = not quiet and not json_output
+
+    from nazar.cache.scan_cache import ScanCache
+    cache = ScanCache(str(path))
+
     if show_ui:
         profile_text = f" | Profil: {profile}" if profile != "full" else ""
+        inc_text = " | Incremental" if incremental else ""
         console.print(Panel(
-            f"[bold magenta]NAZAR AUTO[/bold magenta] - Tam Otonom Test{profile_text}\n"
+            f"[bold magenta]NAZAR AUTO[/bold magenta] - Tam Otonom Test{profile_text}{inc_text}\n"
             "Tara > Planla > Calistir > Raporla", expand=False))
     start = time.time()
     scan_result = _phase_scan(path, show_ui)
-    _test_plan, plan_dict = _phase_plan(scan_result, show_ui, profile=profile)
+
+    # Incremental mod: sadece degisen dosyalari tara
+    if incremental and cache.has_previous_scan():
+        changed, new, deleted = cache.get_changed_files(scan_result.source_files)
+        all_changed = changed + new
+        if show_ui:
+            console.print(f"\n  [bold cyan]Incremental:[/bold cyan] {len(changed)} degisen, {len(new)} yeni, {len(deleted)} silinen dosya")
+        if not all_changed:
+            if show_ui:
+                console.print("  [green]Degisiklik yok, tarama atlaniyor.[/green]")
+                prev = cache.get_last_scan_summary()
+                if prev:
+                    console.print(f"  [dim]Son tarama: {prev['grade']} ({prev['pass_rate']}%)[/dim]")
+            elif not quiet:
+                console.print("Degisiklik tespit edilemedi, tarama atlaniyor.")
+            return []
+        if show_ui:
+            console.print(f"  [yellow]{len(all_changed)} dosya icin testler calistirilacak[/yellow]")
+        # Plan olustur ve testleri changed dosyalara gore filtrele
+        _test_plan, plan_dict = _phase_plan(scan_result, show_ui, profile=profile)
+        plan_dict = _filter_plan_by_changed_files(plan_dict, all_changed)
+        if show_ui:
+            filtered_count = len(plan_dict.get("tests", []))
+            console.print(f"  [dim]{filtered_count} test filtrelendi (degisen dosyalar icin)[/dim]")
+    elif incremental and not cache.has_previous_scan():
+        if show_ui:
+            console.print("\n  [yellow]Onceki tarama bulunamadi, tam tarama yapiliyor...[/yellow]")
+        _test_plan, plan_dict = _phase_plan(scan_result, show_ui, profile=profile)
+    else:
+        _test_plan, plan_dict = _phase_plan(scan_result, show_ui, profile=profile)
+
     orchestrator = TestOrchestrator(str(path), plan_dict)
     results = _phase_execute(orchestrator, plan_dict, json_output, quiet, show_ui)
     _phase_report(results, plan_dict, report, json_output, quiet, show_ui, start)
 
     # Scan cache kaydet
-    from nazar.cache.scan_cache import ScanCache
-    cache = ScanCache(str(path))
     cache.save_scan_result(results, plan_dict, profile, time.time() - start)
     cache.save_file_hashes(scan_result.source_files)
+
+    return results
 
 
 @app.command()
@@ -273,36 +366,106 @@ def auto(
     path: Path = typer.Argument(".", help="Proje dizini"),
     report: str = typer.Option("nazar-report.html", "--report", "-r"),
     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Test profili (full/frontend/backend/security/mobile/ci)"),
+    ci: bool = typer.Option(False, "--ci", help="CI modu kisayolu: profile=ci, json=true, quiet=true, fail-on=high"),
+    fail_on: Optional[str] = typer.Option(None, "--fail-on", help="Exit code 1 esigi: critical, high, medium, low"),
     incremental: bool = typer.Option(False, "--incremental", help="Sadece degisen dosyalari tara"),
     github_pr: bool = typer.Option(False, "--github-pr", help="Sonuclari GitHub PR comment olarak gonder"),
     sarif: Optional[str] = typer.Option(None, "--sarif", help="SARIF cikti dosyasi (GitHub Code Scanning)"),
+    live: bool = typer.Option(False, "--live", help="Canli web raporu baslat (localhost:5555)"),
+    live_port: int = typer.Option(5555, "--live-port", help="Canli web raporu portu"),
 ):
-    """Tek komutla her seyi yap: tara, planla, calistir, raporla."""
+    """Tek komutla her seyi yap: tara, planla, calistir, raporla.
+
+    CI/CD kullanimi:
+      nazar auto . --ci                    # critical+high bulursa exit 1
+      nazar auto . --ci --fail-on critical # sadece critical bulursa exit 1
+      nazar auto . --profile ci --fail-on high --json --quiet
+
+    Canli web raporu:
+      nazar auto . --live                  # localhost:5555'te canli rapor
+      nazar auto . --live --live-port 8080 # farkli port
+    """
     opts = ctx.obj or {}
-    opts["profile"] = profile or "full"
+
+    # --ci kisayolu: profile=ci, json=true, quiet=true, fail-on=high (varsayilan)
+    if ci:
+        opts["profile"] = "ci"
+        opts["json_output"] = True
+        opts["quiet"] = True
+        if fail_on is None:
+            fail_on = "high"  # --ci varsayilani: critical + high = fail
+    else:
+        opts["profile"] = profile or "full"
+
     opts["incremental"] = incremental
-    _run_auto(path, report, opts)
+
+    # Port dogrulama
+    if live and not (1024 <= live_port <= 65535):
+        console.print(f"[red]Gecersiz port: {live_port}. Port 1024-65535 araliginda olmalidir.[/red]")
+        raise SystemExit(1)
+
+    # --live: tarama sirasinda canli web sunucusu baslat
+    live_server = None
+    if live:
+        from nazar.live.server import NazarLiveServer
+        live_server = NazarLiveServer(port=live_port)
+        live_server.set_status("scanning")
+        live_server.start()
+        console.print(f"[cyan]Canli rapor: http://localhost:{live_port}[/cyan]")
+
+    results = _run_auto(path, report, opts)
+
+    # Live sunucuya son sonuclari yukle
+    if live_server:
+        live_server.set_results(results, {})
+        live_server.set_status("done")
+        console.print(f"[cyan]Canli rapor hazir: http://localhost:{live_port}[/cyan]")
+        console.print(f"[dim]Kapatmak icin Ctrl+C[/dim]")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            live_server.stop()
+            console.print("[dim]Canli rapor durduruldu.[/dim]")
 
     if github_pr or sarif:
         # Sonuclari tekrar uret (hafif)
         scan_result = _phase_scan(path, False)
         _test_plan, plan_dict = _phase_plan(scan_result, False)
         orchestrator = TestOrchestrator(str(path), plan_dict)
-        results = orchestrator.run_all()
+        results_for_integrations = orchestrator.run_all()
 
         from nazar.integrations.github_pr import GitHubPRReporter
         reporter = GitHubPRReporter()
 
         if github_pr:
-            if reporter.post_comment(results, plan_dict):
+            if reporter.post_comment(results_for_integrations, plan_dict):
                 console.print("[green]GitHub PR comment gonderildi[/green]")
             else:
                 console.print("[yellow]PR comment gonderilemedi (token/repo/PR bilgisi eksik)[/yellow]")
 
         if sarif:
-            sarif_content = reporter.generate_sarif(results)
+            sarif_content = reporter.generate_sarif(results_for_integrations)
             Path(sarif).write_text(sarif_content)
             console.print(f"[green]SARIF cikti: {sarif}[/green]")
+
+    # --fail-on: belirtilen seviyede veya ustunde basarisiz test varsa exit 1
+    if fail_on and results:
+        fail_on_lower = fail_on.lower()
+        if fail_on_lower not in SEVERITY_LEVELS:
+            console.print(f"[red]Gecersiz --fail-on degeri: {fail_on}. Gecerli: critical, high, medium, low[/red]")
+            raise SystemExit(2)
+        if _has_findings_at_level(results, fail_on_lower):
+            failed_at_level = [
+                r for r in results
+                if not r.get("passed", True)
+                and SEVERITY_LEVELS.get(r.get("priority", "medium").lower(), 2) >= SEVERITY_LEVELS[fail_on_lower]
+            ]
+            if not opts.get("json_output"):
+                console.print(
+                    f"[red]FAIL: {len(failed_at_level)} bulgu ({fail_on_lower}+ seviye)[/red]"
+                )
+            raise SystemExit(1)
 
 
 @app.command()
@@ -459,6 +622,48 @@ def ui_check(
         console.print("\n[bold green]Tum kontroller basarili.[/bold green]")
     else:
         console.print("\n[bold red]Bazi kontroller basarisiz oldu.[/bold red]")
+
+
+@app.command()
+def serve(
+    path: Path = typer.Argument(".", help="Proje dizini (son tarama sonuclarini kullanir)"),
+    port: int = typer.Option(5555, "--port", "-p", help="Sunucu portu"),
+):
+    """Son tarama sonuclarini canli web sayfasinda goster.
+
+    Onceki taramada kaydedilen .nazar/last-scan.json dosyasini okur
+    ve localhost uzerinden gorsel rapor sunar.
+
+    Kullanim:
+      nazar serve                     # localhost:5555
+      nazar serve ~/MyProject -p 8080 # farkli proje ve port
+    """
+    from nazar.live.server import NazarLiveServer
+    from nazar.cache.scan_cache import ScanCache
+
+    resolved_path = Path(path).resolve()
+    cache = ScanCache(str(resolved_path))
+
+    if not cache.has_previous_scan():
+        console.print(f"[red]Tarama sonucu bulunamadi: {resolved_path}[/red]")
+        console.print("[dim]Once 'nazar auto <yol>' ile tarama yapin.[/dim]")
+        raise typer.Exit(1)
+
+    summary = cache.get_last_scan_summary()
+    console.print(Panel(
+        f"[bold cyan]NAZAR SERVE[/bold cyan] - Canli Web Raporu\n"
+        f"Proje: {resolved_path.name}  |  Son tarama: {summary.get('grade', '?')} ({summary.get('pass_rate', 0)}%)\n"
+        f"http://localhost:{port}", expand=False))
+
+    server = NazarLiveServer.from_cache(str(resolved_path), port=port)
+    console.print(f"[green]Sunucu baslatildi: http://localhost:{port}[/green]")
+    console.print("[dim]Durdurmak icin Ctrl+C[/dim]")
+
+    try:
+        server.start_blocking()
+    except KeyboardInterrupt:
+        pass
+    console.print("[dim]Sunucu durduruldu.[/dim]")
 
 
 if __name__ == "__main__":
