@@ -8,7 +8,7 @@
 <h3 align="center">Autonomous Security & Quality Scanner</h3>
 
 <p align="center">
-  <em>Zero-config. Framework-aware. 197+ automated checks.</em>
+  <em>Zero-config. Framework-aware. 280+ automated checks.</em>
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 ---
 
-**Nazar** scans your project, understands its architecture, generates a tailored test plan, and runs 197+ security & quality checks -- all without any configuration. Just type `nazar` and let it do the rest.
+**Nazar** scans your project, understands its architecture, generates a tailored test plan, and runs 280+ security & quality checks -- all without any configuration. Just type `nazar` and let it do the rest.
 
 ```bash
 pip install nazar
@@ -106,7 +106,7 @@ Commands work with or without `/` prefix. Turkish aliases supported (`tara`, `ra
 
 ---
 
-## What It Checks (197+ Tests, 21 Categories)
+## What It Checks (280+ Tests, 30+ Categories)
 
 ### Security (63 tests)
 | Check | What it catches |
@@ -163,7 +163,7 @@ Not every project needs every test. Nazar has 8 built-in profiles:
 
 | Profile | Focus | Best for |
 |---------|-------|----------|
-| `full` | All 197+ tests | Comprehensive audit |
+| `full` | All 280+ tests | Comprehensive audit |
 | `frontend` | UI, UX, accessibility, responsive | React, Vue, Flutter |
 | `backend` | Security, API, code quality | Django, FastAPI, Express |
 | `security` | All security-related tests | Security audit |
