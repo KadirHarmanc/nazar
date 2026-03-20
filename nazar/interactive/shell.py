@@ -697,30 +697,38 @@ class NazarShell:
         parts = fmt_str.split(None, 1)
         fmt = parts[0] if parts else "html"
         out = parts[1] if len(parts) > 1 else None
+        # Raporu proje dizinine kaydet
+        base_dir = self.project_path if self.project_path else os.getcwd()
         if fmt == "html":
-            out = out or "nazar-report.html"
+            out = out or os.path.join(base_dir, "nazar-report.html")
             from nazar.reporter.html_reporter import HTMLReporter
             HTMLReporter().generate(self.results, self.plan_data or {}, out)
         elif fmt == "json":
-            out = out or "nazar-report.json"
+            out = out or os.path.join(base_dir, "nazar-report.json")
             from nazar.reporters.json_reporter import JSONReporter
             JSONReporter().generate(self.results, self.plan_data or {}, out)
         elif fmt == "sarif":
-            out = out or "nazar-report.sarif"
+            out = out or os.path.join(base_dir, "nazar-report.sarif")
             from nazar.reporters.sarif_reporter import SARIFReporter
             SARIFReporter().generate(self.results, self.plan_data or {}, out)
         elif fmt == "markdown":
-            out = out or "nazar-report.md"
+            out = out or os.path.join(base_dir, "nazar-report.md")
             from nazar.reporters.markdown_reporter import MarkdownReporter
             MarkdownReporter().generate(self.results, self.plan_data or {}, out)
         elif fmt == "junit":
-            out = out or "nazar-report.xml"
+            out = out or os.path.join(base_dir, "nazar-report.xml")
             from nazar.reporters.junit_reporter import JUnitReporter
             JUnitReporter().generate(self.results, self.plan_data or {}, out)
         else:
             self.console.print(f"[red]Format: html/json/sarif/markdown/junit[/red]")
             return
-        self.console.print(f"[green]Rapor olusturuldu: {out}[/green]")
+        abs_out = os.path.abspath(out)
+        self.console.print(f"[green]Rapor olusturuldu:[/green] {abs_out}")
+        # HTML ise tarayicide ac
+        if fmt == "html":
+            import webbrowser
+            webbrowser.open(f"file://{abs_out}")
+            self.console.print("[dim]Tarayicida acildi[/dim]")
 
     def _categories(self):
         table = Table(title="Nazar v4.0 Kategorileri", box=box.ROUNDED)
@@ -1058,45 +1066,42 @@ class NazarShell:
         self.console.print(table)
 
     def _run_live_test(self, project_path):
-        """Statik tarama sonrasi canli runtime test calistir."""
+        """Maestro Studio ile gorsel runtime test arayuzu ac."""
         import subprocess as _sp
         import shutil
+        import webbrowser
 
         self.console.print()
         self.console.print(Panel("[bold cyan]CANLI RUNTIME TEST[/bold cyan]", border_style="cyan"))
 
-        # 1. Maestro kontrolu
-        if not shutil.which("maestro"):
+        # 1. Maestro kontrolu - PATH + ~/.maestro/bin kontrol
+        maestro_bin = shutil.which("maestro") or os.path.expanduser("~/.maestro/bin/maestro")
+        if not os.path.isfile(maestro_bin):
             self.console.print("  [yellow]Maestro kurulu degil. Kuruluyor...[/yellow]")
             try:
-                r = _sp.run(
-                    ["bash", "-c", 'curl -Ls "https://get.maestro.mobile.dev" | bash'],
-                    capture_output=True, text=True, timeout=120,
-                )
-                if shutil.which("maestro") or _sp.run(["bash", "-c", "source ~/.bashrc 2>/dev/null; which maestro"], capture_output=True, text=True).returncode == 0:
-                    self.console.print("  [green]Maestro kuruldu[/green]")
-                else:
-                    self.console.print("  [red]Maestro kurulamadi. Manuel kurun: curl -Ls \"https://get.maestro.mobile.dev\" | bash[/red]")
+                _sp.run(["bash", "-c", 'curl -Ls "https://get.maestro.mobile.dev" | bash'], timeout=120)
+                maestro_bin = os.path.expanduser("~/.maestro/bin/maestro")
+                if not os.path.isfile(maestro_bin):
+                    self.console.print("  [red]Maestro kurulamadi.[/red]")
+                    self.console.print("  [dim]Manuel: curl -Ls \"https://get.maestro.mobile.dev\" | bash[/dim]")
                     return
+                self.console.print("  [green]Maestro kuruldu[/green]")
             except Exception:
-                self.console.print("  [red]Maestro kurulumu basarisiz[/red]")
+                self.console.print("  [red]Kurulum basarisiz[/red]")
                 return
 
         # 2. Cihaz kontrolu
         device_name = None
-        # iOS Simulator
         try:
             r = _sp.run(["xcrun", "simctl", "list", "devices", "booted"], capture_output=True, text=True, timeout=10)
             for line in r.stdout.splitlines():
                 if "Booted" in line:
-                    import re as _re
-                    m = _re.search(r'^\s+(.+?)\s+\(', line)
+                    m = re.search(r'^\s+(.+?)\s+\(', line)
                     if m:
                         device_name = m.group(1)
                     break
         except Exception:
             pass
-        # Android
         if not device_name:
             try:
                 r = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
@@ -1107,22 +1112,20 @@ class NazarShell:
                 pass
 
         if not device_name:
-            self.console.print("  [red]Bagli cihaz/simulator bulunamadi![/red]")
-            self.console.print("  [dim]iOS: Xcode > Open Simulator[/dim]")
+            self.console.print("  [red]Simulator/emulator bulunamadi![/red]")
+            self.console.print("  [dim]iOS: Xcode > Open Developer Tool > Simulator[/dim]")
             self.console.print("  [dim]Android: emulator -avd <isim>[/dim]")
             return
 
         self.console.print(f"  [green]Cihaz:[/green] {device_name}")
 
-        # 3. YAML test dosyalarini bul
+        # 3. YAML test dosyalarini uret (yoksa)
         ui_dir = Path(project_path) / ".nazar" / "ui-tests"
         yaml_files = []
         if ui_dir.exists():
             yaml_files = list(ui_dir.glob("*.yml")) + list(ui_dir.glob("*.yaml"))
-
         if not yaml_files:
-            # Otomatik uret
-            self.console.print("  [yellow]UI test dosyasi bulunamadi. Otomatik uretiliyor...[/yellow]")
+            self.console.print("  [yellow]UI test dosyasi uretiliyor...[/yellow]")
             try:
                 from nazar.analyzers.yaml_ui_runner import YAMLUIGenerator
                 gen = YAMLUIGenerator(str(project_path))
@@ -1130,102 +1133,47 @@ class NazarShell:
                 if created:
                     yaml_files = [Path(f) for f in created]
                     self.console.print(f"  [green]{len(created)} test dosyasi olusturuldu[/green]")
-                else:
-                    self.console.print("  [dim]Ekran bulunamadi, test uretilemedi[/dim]")
-                    return
-            except Exception as e:
-                self.console.print(f"  [red]Uretim hatasi: {e}[/red]")
-                return
+            except Exception:
+                pass
 
-        # 4. Test sec
-        self.console.print(f"\n  [bold]{len(yaml_files)} test dosyasi:[/bold]")
-        for i, yf in enumerate(yaml_files, 1):
-            self.console.print(f"    [cyan][{i}][/cyan] {yf.stem}")
-        self.console.print(f"    [cyan][0][/cyan] Hepsini calistir")
+        # 4. Maestro Studio ac - tarayicide gorsel arayuz
+        self.console.print()
+        self.console.print("  [bold cyan]Maestro Studio aciliyor...[/bold cyan]")
+        self.console.print("  [dim]Tarayicinizda simulator ekrani ve test adimlari gorunecek[/dim]")
+        self.console.print("  [dim]Kapatmak icin Ctrl+C basin[/dim]")
+        self.console.print()
 
         try:
-            choice = self.session.prompt(HTML('<style fg="#06b6d4"><b>[sec]</b></style><style fg="#475569">&gt; </style>'))
-            choice = choice.strip()
-            if choice == "0":
-                selected = yaml_files
-            elif choice.isdigit() and 1 <= int(choice) <= len(yaml_files):
-                selected = [yaml_files[int(choice) - 1]]
-            else:
-                self.console.print("  [dim]Iptal edildi[/dim]")
-                return
-        except (KeyboardInterrupt, EOFError):
-            return
+            # Tarayiciyi ac
+            webbrowser.open("http://localhost:9999")
 
-        # 5. Maestro ile calistir
-        for yf in selected:
-            self.console.print(f"\n  [bold cyan]Calistiriliyor:[/bold cyan] {yf.name}")
-
-            # Nazar YAML -> Maestro format cevirisi
+            # Maestro Studio baslat (blocking - Ctrl+C ile durur)
+            process = _sp.Popen(
+                [maestro_bin, "studio"],
+                cwd=str(project_path),
+                stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+            )
             try:
-                from nazar.executors.flow_converter import convert_nazar_to_maestro
-                maestro_content = convert_nazar_to_maestro(str(yf))
-                # Gecici maestro dosyasi
-                import tempfile
-                tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="nazar_maestro_", delete=False, dir=str(ui_dir))
-                tmp.write(maestro_content)
-                tmp.close()
-                run_file = tmp.name
-            except Exception:
-                run_file = str(yf)
-
-            # Maestro calistir
-            try:
-                cmd = ["maestro", "test", run_file]
-                self.console.print(f"  [dim]> {' '.join(cmd)}[/dim]\n")
-
-                process = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, cwd=str(project_path))
-                step_idx = 0
-                try:
-                    for line in iter(process.stdout.readline, ""):
-                        line = line.rstrip()
-                        if not line:
-                            continue
-                        # Adim durumu goster
-                        if "PASS" in line.upper() or "✅" in line:
-                            self.console.print(f"    [green]OK[/green] {line.strip()[:70]}")
-                            step_idx += 1
-                        elif "FAIL" in line.upper() or "❌" in line:
-                            self.console.print(f"    [red]XX[/red] {line.strip()[:70]}")
-                            step_idx += 1
-                        elif "Running" in line or "Executing" in line:
-                            self.console.print(f"    [yellow]>>[/yellow] {line.strip()[:70]}")
-                        else:
-                            self.console.print(f"    [dim]{line.strip()[:70]}[/dim]")
-                    process.wait(timeout=300)
-                finally:
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait()
-
-                rc = process.returncode
-                if rc == 0:
-                    self.console.print(f"\n  [bold green]PASSED[/bold green] {yf.name}")
-                else:
-                    self.console.print(f"\n  [bold red]FAILED[/bold red] {yf.name} (exit: {rc})")
-
-            except _sp.TimeoutExpired:
-                self.console.print(f"  [red]TIMEOUT - 5dk'yi asti[/red]")
-                if process.poll() is None:
-                    process.kill()
-            except FileNotFoundError:
-                self.console.print("  [red]maestro komutu bulunamadi. PATH'e eklenmis mi?[/red]")
-                return
-            except Exception as e:
-                self.console.print(f"  [red]Hata: {e}[/red]")
+                for line in iter(process.stdout.readline, ""):
+                    line = line.rstrip()
+                    if line:
+                        self.console.print(f"  [dim]{line[:80]}[/dim]")
+            except KeyboardInterrupt:
+                pass
             finally:
-                # Gecici dosyayi temizle
-                try:
-                    if run_file != str(yf) and os.path.exists(run_file):
-                        os.unlink(run_file)
-                except Exception:
-                    pass
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except _sp.TimeoutExpired:
+                        process.kill()
 
-        self.console.print(f"\n[dim]Canli test tamamlandi[/dim]")
+            self.console.print("\n  [dim]Maestro Studio kapatildi[/dim]")
+
+        except FileNotFoundError:
+            self.console.print(f"  [red]Maestro bulunamadi: {maestro_bin}[/red]")
+        except Exception as e:
+            self.console.print(f"  [red]Hata: {e}[/red]")
 
     def _run_ui(self):
         """Maestro ile UI testlerini cihazda calistir."""
