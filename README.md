@@ -391,7 +391,7 @@ nazar/
 ## Development
 
 ```bash
-git clone https://github.com/nazarproject/nazar.git
+git clone https://github.com/KadirHarmanc/nazar.git
 cd nazar
 pip install -e ".[dev]"
 pytest

@@ -36,11 +36,11 @@ turkish = ["zeyrek>=0.1.0", "pyspellchecker>=0.7.2"]
 dev = ["pytest>=7.4.0", "pytest-cov>=4.1.0", "black>=23.0", "ruff>=0.4.0", "mypy>=1.0"]
 
 [project.urls]
-Homepage = "https://github.com/user/nazar"
-Repository = "https://github.com/user/nazar"
-Documentation = "https://github.com/user/nazar#readme"
-"Bug Tracker" = "https://github.com/user/nazar/issues"
-Changelog = "https://github.com/user/nazar/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/KadirHarmanc/nazar"
+Repository = "https://github.com/KadirHarmanc/nazar"
+Documentation = "https://github.com/KadirHarmanc/nazar#readme"
+"Bug Tracker" = "https://github.com/KadirHarmanc/nazar/issues"
+Changelog = "https://github.com/KadirHarmanc/nazar/blob/main/CHANGELOG.md"
 
 [project.scripts]
 nazar = "nazar.cli:app"

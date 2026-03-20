@@ -44,3 +44,4 @@ MIMARI-SECIM-VE-UI-TEST.md
 docs/apple-*.md
 nazar-landing*.html
 dist 2/
+.github/workflows/

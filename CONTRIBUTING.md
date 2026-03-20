@@ -107,7 +107,7 @@ class MyPlugin(BaseTestPlugin):
 
 ## Raporlama
 
-- Bug: [GitHub Issues](https://github.com/user/nazar/issues) uzerinden
+- Bug: [GitHub Issues](https://github.com/KadirHarmanc/nazar/issues) uzerinden
 - Guvenlik acigi: [SECURITY.md](SECURITY.md) talimatlarini izleyin
 - Ozellik onerisi: Issue Template kullanin
 

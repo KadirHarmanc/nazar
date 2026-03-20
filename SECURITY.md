@@ -1,45 +1,48 @@
-# Guvenlik Politikasi
+# Security Policy
 
-## Desteklenen Surumler
+## Supported Versions
 
-| Surum | Destek |
-|-------|--------|
-| 2.x   | Aktif destek |
-| 1.x   | Guvenlik yamalari |
-| < 1.0 | Desteklenmiyor |
+| Version | Support |
+|---------|---------|
+| 5.x     | Active support |
+| 4.x     | Security patches |
+| < 4.0   | Not supported |
 
-## Guvenlik Acigi Raporlama
+## Reporting a Vulnerability
 
-Guvenlik acigi buldunuz mu? Lutfen **acik bir issue ACMAYIN**.
+Found a security issue? Please **DO NOT open a public issue**.
 
-### Raporlama Adimi
+### How to Report
 
-1. Acigi detayli sekilde aciklayin
-2. Mumkunse yeniden uretme adimlari ekleyin
-3. Etkilenen surumleri belirtin
-4. GitHub Security Advisories uzerinden raporlayin
+1. Describe the vulnerability in detail
+2. Include reproduction steps if possible
+3. Specify affected versions
+4. Report via [GitHub Security Advisories](https://github.com/KadirHarmanc/nazar/security/advisories)
 
-### Beklentiler
+### Response Timeline
 
-- 48 saat icinde ilk yanit
-- 7 gun icinde duzeltme plani
-- Duzeltme yayinlaninca kredi verilir
+- Initial response within 48 hours
+- Fix plan within 7 days
+- Credit given when fix is published
 
-### Kapsam
+### In Scope
 
-- Nazar'in kendisindeki guvenlik aciklari
-- Tarama sirasinda bilgi sizintisi
-- Dependency chain aciklari
+- Security vulnerabilities in Nazar itself
+- Information disclosure during scanning
+- Dependency chain vulnerabilities
 
-### Kapsam Disi
+### Out of Scope
 
-- Nazar'in taradigi projelerdeki aciklar (bu zaten Nazar'in isi)
-- Sosyal muhendislik
-- DoS saldirilari
+- Vulnerabilities in scanned projects (that's Nazar's job to find)
+- Social engineering
+- DoS attacks
 
-## Bilinen Guvenlik Onlemleri
+## Security Measures
 
-- Nazar tarama sirasinda hicbir dosyayi degistirmez
-- Ag istekleri sadece API test asamasinda yapilir
-- Tum dosya islemleri read-only'dir
-- Secret pattern'leri raporda maskelenir
+- Nazar never modifies any files during scanning
+- Network requests only during API testing phase
+- All file operations are read-only
+- Secret patterns are masked in reports
+- Path traversal protection on file reads
+- SSRF protection on API endpoint testing
+- Plugin directories restricted to project root
