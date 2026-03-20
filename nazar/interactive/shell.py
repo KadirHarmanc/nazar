@@ -42,6 +42,7 @@ HELP_TEXT = """
   [cyan]categories[/cyan]    [dim]|[/dim] [cyan]cat[/cyan]         Kategori listesi
   [cyan]stats[/cyan]                        Genel istatistikler
   [cyan]profiles[/cyan]      [dim]|[/dim] [cyan]profiller[/cyan]   Test profilleri
+  [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Maestro ile UI test calistir
   [cyan]live[/cyan]          [dim]|[/dim] [cyan]serve[/cyan]       Canli web raporu (localhost:5555)
   [cyan]update[/cyan]        [dim]|[/dim] [cyan]guncelle[/cyan]    Son versiyona guncelle
   [cyan]clear[/cyan]         [dim]|[/dim] [cyan]temizle[/cyan]     Ekrani temizle
@@ -56,8 +57,8 @@ HELP_TEXT = """
 
 
 class NazarCompleter(Completer):
-    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "help", "quit",
-                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "yardim", "cikis", "cat"]
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "run", "help", "quit",
+                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "calistir", "yardim", "cikis", "cat"]
     FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
     FORMATS = ["html", "json", "sarif", "junit", "markdown"]
 
@@ -165,6 +166,7 @@ class NazarShell:
             "categories": self._categories, "kategoriler": self._categories, "c": self._categories, "cat": self._categories,
             "profiles": self._profiles, "profiller": self._profiles,
             "stats": self._stats, "istatistik": self._stats,
+            "run": self._run_ui, "calistir": self._run_ui,
             "live": self._live, "serve": self._live,
             "clear": self._clear, "temizle": self._clear,
             "update": self._update, "guncelle": self._update,
@@ -401,8 +403,9 @@ class NazarShell:
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Paralel batch boyutu - bagimsiz testleri ayni anda calistir
-        BATCH_SIZE = 6
+        # Paralel batch boyutu ve test timeout
+        BATCH_SIZE = 8
+        TEST_TIMEOUT = 30  # saniye - tek bir test max 30sn
 
         try:
             with Live(build_live_with_spinner(), console=self.console, refresh_per_second=4, transient=True) as live:
@@ -427,28 +430,46 @@ class NazarShell:
                         active_test_start = time.time()
                         active_test_idx[0] = i
 
-                        # Spinner guncelle, tamamlananlari isle
+                        # Spinner guncelle, tamamlananlari isle - batch timeout ile
                         done_futures = set()
+                        batch_start = time.time()
                         while len(done_futures) < len(futures):
                             live.update(build_live_with_spinner())
                             time.sleep(0.25)
+                            # Batch timeout: 30sn'den uzun surerse kalan testleri iptal et
+                            if time.time() - batch_start > TEST_TIMEOUT:
+                                for fut in list(futures):
+                                    if fut not in done_futures:
+                                        fut.cancel()
+                                        done_futures.add(fut)
+                                        idx_f, test_f = futures[fut]
+                                        self.results.append({
+                                            "name": test_f.get("name", "?"), "passed": False,
+                                            "type": test_f.get("type", "other"), "subtype": test_f.get("subtype", ""),
+                                            "priority": test_f.get("priority", "medium"),
+                                            "detail": f"TIMEOUT ({TEST_TIMEOUT}s)", "duration": TEST_TIMEOUT,
+                                            "confidence": 0, "confidence_label": "Timeout",
+                                        })
+                                        tc = test_f.get("type", "other")
+                                        failed += 1
+                                        cat_results[tc]["f"] += 1
+                                break
                             for fut in list(futures):
                                 if fut.done() and fut not in done_futures:
                                     done_futures.add(fut)
                                     idx_f, test_f = futures[fut]
                                     try:
-                                        result = fut.result()
+                                        result = fut.result(timeout=0)
                                     except Exception as exc:
                                         result = {
-                                            "name": test_f.get("name", "unknown"),
-                                            "passed": False,
-                                            "type": test_f.get("type", "other"),
+                                            "name": test_f.get("name", "?"), "passed": False,
+                                            "type": test_f.get("type", "other"), "subtype": test_f.get("subtype", ""),
                                             "priority": test_f.get("priority", "medium"),
-                                            "detail": f"Test calistirilirken hata: {exc}",
+                                            "detail": f"Hata: {str(exc)[:60]}",
                                         }
                                     self.results.append(result)
                                     tc = test_f.get("type", "other")
-                                    if result["passed"]:
+                                    if result.get("passed"):
                                         passed += 1
                                         cat_results[tc]["p"] += 1
                                     else:
@@ -1011,6 +1032,167 @@ class NazarShell:
             table.add_row("[bold]Son Tarama[/bold]", f"[bold]{self.project_path}[/bold]")
             table.add_row("Gecen/Kalan", f"[green]{p}[/green] / [red]{f}[/red]")
         self.console.print(table)
+
+    def _run_ui(self):
+        """Maestro ile UI testlerini cihazda calistir."""
+        import subprocess as _sp
+
+        # 1. Maestro kurulu mu?
+        maestro_ok = False
+        try:
+            r = _sp.run(["maestro", "--version"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                maestro_ok = True
+                self.console.print(f"\n  [green]Maestro:[/green] {r.stdout.strip()}")
+        except FileNotFoundError:
+            pass
+
+        if not maestro_ok:
+            self.console.print("\n[red]  Maestro kurulu degil. Kurmak icin:[/red]")
+            self.console.print("    [cyan]brew install maestro[/cyan]  [dim](macOS)[/dim]")
+            self.console.print('    [cyan]curl -Ls "https://get.maestro.mobile.dev" | bash[/cyan]  [dim](Linux/macOS)[/dim]')
+            self.console.print()
+            return
+
+        # 2. Bagli cihaz/emulator var mi?
+        device_found = False
+        device_name = ""
+        try:
+            r = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+            lines = [l for l in r.stdout.strip().split("\n")[1:] if l.strip() and "device" in l]
+            if lines:
+                device_found = True
+                device_name = lines[0].split()[0]
+                self.console.print(f"  [green]Cihaz:[/green] {device_name}")
+        except FileNotFoundError:
+            pass
+
+        if not device_found:
+            try:
+                r = _sp.run(["xcrun", "simctl", "list", "devices", "booted"], capture_output=True, text=True, timeout=10)
+                if "Booted" in r.stdout:
+                    device_found = True
+                    self.console.print(f"  [green]iOS Simulator:[/green] aktif")
+            except FileNotFoundError:
+                pass
+
+        if not device_found:
+            self.console.print("\n[yellow]  Bagli cihaz veya emulator bulunamadi.[/yellow]")
+            self.console.print("  [dim]Android: adb devices | iOS: xcrun simctl list devices booted[/dim]\n")
+            return
+
+        # 3. YAML dosyalarini bul
+        search_path = None
+        if self.project_path:
+            search_path = Path(self.project_path)
+        else:
+            self.console.print("\n[yellow]  Once bir proje tarayin veya yol belirtin.[/yellow]")
+            self.console.print("  [dim]Ornek: scan ~/Desktop/MyProject[/dim]\n")
+            return
+
+        nazar_dir = search_path / ".nazar" / "ui-tests"
+        yaml_files = []
+        if nazar_dir.exists():
+            yaml_files = sorted(
+                [f for f in nazar_dir.glob("*.yml")]
+                + [f for f in nazar_dir.glob("*.yaml")]
+            )
+
+        if not yaml_files:
+            # Dogrudan proje kokunde de bak
+            yaml_files = sorted(
+                [f for f in search_path.glob("*.yml")]
+                + [f for f in search_path.glob("*.yaml")]
+            )
+
+        if not yaml_files:
+            self.console.print(f"\n[yellow]  YAML test dosyasi bulunamadi: {search_path}[/yellow]")
+            self.console.print("  [dim].nazar/ui-tests/ dizinine bakildi. 'nazar ui init' ile olusturun.[/dim]\n")
+            return
+
+        # 4. Kullaniciya secim menusu goster
+        self.console.print(f"\n  [bold]{len(yaml_files)} UI test dosyasi bulundu:[/bold]\n")
+        for i, yf in enumerate(yaml_files, 1):
+            self.console.print(f"  [bold cyan][{i}][/bold cyan] {yf.name}")
+        self.console.print(f"  [bold cyan][0][/bold cyan] Tumu calistir")
+        self.console.print()
+
+        try:
+            choice = self.session.prompt(
+                HTML('<style fg="#6366f1"><b>run</b></style><style fg="#475569"> (0-' + str(len(yaml_files)) + ')&gt; </style>')
+            )
+            choice = choice.strip()
+            ci = int(choice)
+            if ci == 0:
+                selected_files = yaml_files
+            elif 1 <= ci <= len(yaml_files):
+                selected_files = [yaml_files[ci - 1]]
+            else:
+                self.console.print("  [dim]Gecersiz secim.[/dim]\n")
+                return
+        except (ValueError, KeyboardInterrupt, EOFError):
+            self.console.print("  [dim]Iptal edildi.[/dim]\n")
+            return
+
+        # 5. Secilen testleri Maestro ile calistir
+        total = len(selected_files)
+        results = []
+
+        for i, yf in enumerate(selected_files, 1):
+            fname = yf.name
+            self.console.print(f"\n  [bold cyan][{i}/{total}][/bold cyan] {fname}")
+
+            cmd = ["maestro", "test", str(yf)]
+            if device_name:
+                cmd.extend(["--device", device_name])
+
+            step_start = time.time()
+            try:
+                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True)
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line.strip():
+                        self.console.print(f"    [dim]{line.strip()[:80]}[/dim]")
+                proc.wait()
+                success = proc.returncode == 0
+                duration = time.time() - step_start
+                status = "[green]GECTI[/green]" if success else "[red]BASARISIZ[/red]"
+                self.console.print(f"    {status} [dim]({duration:.1f}s)[/dim]")
+                results.append({"file": fname, "passed": success, "duration": duration})
+            except _sp.TimeoutExpired:
+                self.console.print(f"    [red]ZAMAN ASIMI[/red]")
+                results.append({"file": fname, "passed": False, "duration": 300.0})
+            except Exception as exc:
+                self.console.print(f"    [red]HATA: {exc}[/red]")
+                results.append({"file": fname, "passed": False, "duration": 0.0})
+
+        # 6. Sonuc ozeti
+        passed = sum(1 for r in results if r["passed"])
+        failed = total - passed
+        total_dur = sum(r["duration"] for r in results)
+
+        self.console.print()
+        summary_table = Table(title="UI Test Sonuclari", show_header=True)
+        summary_table.add_column("#", style="dim", width=4)
+        summary_table.add_column("Test", style="white")
+        summary_table.add_column("Sonuc", width=10)
+        summary_table.add_column("Sure", width=8, justify="right")
+
+        for idx, r in enumerate(results, 1):
+            status = "[green]GECTI[/green]" if r["passed"] else "[red]KALDI[/red]"
+            summary_table.add_row(str(idx), r["file"], status, f"{r['duration']:.1f}s")
+
+        self.console.print(summary_table)
+
+        rate = (passed / total * 100) if total > 0 else 0
+        gs = "green" if rate >= 80 else "yellow" if rate >= 60 else "red"
+        self.console.print(Panel(
+            f"[{gs}]{passed}/{total} gecti ({rate:.0f}%)[/{gs}]  |  "
+            f"[green]{passed} basarili[/green]  |  [red]{failed} basarisiz[/red]  |  "
+            f"[dim]Toplam: {total_dur:.1f}s[/dim]",
+            title="[bold cyan]UI TEST SONUC[/bold cyan]", border_style="cyan",
+        ))
+        self.console.print()
 
     def _live(self):
         """Canli web raporu baslat - son tarama sonuclarini localhost:5555'te goster."""

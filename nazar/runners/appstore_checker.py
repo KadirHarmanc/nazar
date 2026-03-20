@@ -15,8 +15,40 @@ def _fmt(hits, msg="bulundu"):
     return False, f"{len(hits)} {msg}: {first['file']}:{first['line']}"
 
 
+APPSTORE_IGNORE = {"node_modules", ".git", "build", "dist", "Pods", ".gradle", "vendor", "venv", ".venv", "__pycache__", ".expo", "coverage", ".next"}
+
+
 class AppStoreChecker(BaseRunner):
     """Apple App Store compliance kontrolleri. Sadece iOS/RN/Flutter projeler icin."""
+
+    def __init__(self, project_path: str):
+        super().__init__(project_path)
+        self._all_files_cache = None
+
+    def _all_files(self) -> List[Tuple[str, str]]:
+        """Tum dosyalari bir kere tara ve cache'le. (rel_path, full_path) dondurur."""
+        if self._all_files_cache is not None:
+            return self._all_files_cache
+        result = []
+        for rd, dirs, files in os.walk(self.root):
+            dirs[:] = [d for d in dirs if d not in APPSTORE_IGNORE]
+            for f in files:
+                full = os.path.join(rd, f)
+                rel = os.path.relpath(full, self.root)
+                result.append((rel, full))
+        self._all_files_cache = result
+        return result
+
+    def _find_file(self, filename: str) -> str:
+        """Tek bir dosya ara, bulursa rel_path don."""
+        for rel, full in self._all_files():
+            if os.path.basename(rel) == filename:
+                return rel
+        return ""
+
+    def _find_files_by_ext(self, ext: str) -> List[Tuple[str, str]]:
+        """Uzantiya gore dosya bul."""
+        return [(rel, full) for rel, full in self._all_files() if rel.endswith(ext)]
 
     # ================================================================
     # KRITIK - Kesin Red Sebebi
@@ -24,11 +56,9 @@ class AppStoreChecker(BaseRunner):
 
     def check_privacy_manifest(self, t: dict) -> Tuple[bool, str]:
         """PrivacyInfo.xcprivacy dosyasi var mi - Mayis 2024'ten beri zorunlu."""
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "build", "Pods", "vendor"}]
-            for f in files:
-                if f == "PrivacyInfo.xcprivacy":
-                    return True, f"PrivacyInfo.xcprivacy mevcut: {os.path.relpath(os.path.join(rd, f), self.root)}"
+        found = self._find_file("PrivacyInfo.xcprivacy")
+        if found:
+            return True, f"PrivacyInfo.xcprivacy mevcut: {found}"
         return False, "PrivacyInfo.xcprivacy dosyasi bulunamadi - Mayis 2024'ten beri ZORUNLU"
 
     def check_purpose_strings(self, t: dict) -> Tuple[bool, str]:
@@ -215,12 +245,9 @@ class AppStoreChecker(BaseRunner):
 
         # PrivacyInfo.xcprivacy kontrol
         privacy_manifest = ""
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods"}]
-            for f in files:
-                if f == "PrivacyInfo.xcprivacy":
-                    privacy_manifest = Path(os.path.join(rd, f)).read_text(errors="ignore")
-                    break
+        found = self._find_file("PrivacyInfo.xcprivacy")
+        if found:
+            privacy_manifest = Path(os.path.join(self.root, found)).read_text(errors="ignore")
 
         if not privacy_manifest and apis_used:
             return False, f"{', '.join(apis_used)} API kullaniliyor ama PrivacyInfo.xcprivacy'de beyan YOK"
@@ -237,15 +264,14 @@ class AppStoreChecker(BaseRunner):
     def check_app_icon_sizes(self, t: dict) -> Tuple[bool, str]:
         """App icon dosyalari var mi."""
         icon_found = False
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods", "vendor"}]
-            if "AppIcon" in rd or "appiconset" in rd:
+        for rel, full in self._all_files():
+            dirpath = os.path.dirname(full)
+            if "AppIcon" in dirpath or "appiconset" in dirpath:
                 icon_found = True
                 # Contents.json kontrol
-                contents = os.path.join(rd, "Contents.json")
-                if os.path.exists(contents):
+                if os.path.basename(rel) == "Contents.json":
                     try:
-                        data = json.loads(Path(contents).read_text())
+                        data = json.loads(Path(full).read_text())
                         images = data.get("images", [])
                         sizes = [img.get("size", "") for img in images if img.get("filename")]
                         if len(sizes) < 5:
@@ -264,12 +290,11 @@ class AppStoreChecker(BaseRunner):
     def check_launch_screen(self, t: dict) -> Tuple[bool, str]:
         """Launch screen / splash screen var mi."""
         launch_found = False
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods", "vendor"}]
-            for f in files:
-                if "LaunchScreen" in f or "SplashScreen" in f or "launch_screen" in f:
-                    launch_found = True
-                    break
+        for rel, full in self._all_files():
+            fname = os.path.basename(rel)
+            if "LaunchScreen" in fname or "SplashScreen" in fname or "launch_screen" in fname:
+                launch_found = True
+                break
         # Expo splash config
         app_json = self.read("app.json")
         if app_json and "splash" in app_json:
@@ -282,12 +307,9 @@ class AppStoreChecker(BaseRunner):
         """iOS deployment target guncel mi."""
         # Xcode project
         pbxproj = ""
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods"}]
-            for f in files:
-                if f == "project.pbxproj":
-                    pbxproj = Path(os.path.join(rd, f)).read_text(errors="ignore")
-                    break
+        found = self._find_file("project.pbxproj")
+        if found:
+            pbxproj = Path(os.path.join(self.root, found)).read_text(errors="ignore")
         if pbxproj:
             targets = re.findall(r"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*(\d+\.?\d*)", pbxproj)
             if targets:
@@ -392,14 +414,9 @@ class AppStoreChecker(BaseRunner):
         }
         # PrivacyInfo.xcprivacy bul ve oku
         privacy_content = ""
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods"}]
-            for f in files:
-                if f == "PrivacyInfo.xcprivacy":
-                    privacy_content = Path(os.path.join(rd, f)).read_text(errors="ignore")
-                    break
-            if privacy_content:
-                break
+        found = self._find_file("PrivacyInfo.xcprivacy")
+        if found:
+            privacy_content = Path(os.path.join(self.root, found)).read_text(errors="ignore")
         if not privacy_content:
             return True, "PrivacyInfo.xcprivacy yok (ayri kontrol)"
         # Reason kodlarini dogrula
@@ -561,17 +578,14 @@ class AppStoreChecker(BaseRunner):
     def check_app_thinning(self, t: dict) -> Tuple[bool, str]:
         """Buyuk asset'ler - app boyutu sorunu."""
         large_assets = []
-        for rd, dirs, files in os.walk(self.root):
-            dirs[:] = [d for d in dirs if d not in {"node_modules", ".git", "Pods", "vendor", ".venv"}]
-            for f in files:
-                if f.endswith((".png", ".jpg", ".mp4", ".mov", ".wav", ".mp3")):
-                    fp = os.path.join(rd, f)
-                    try:
-                        size_mb = os.path.getsize(fp) / 1024 / 1024
-                        if size_mb > 5:
-                            large_assets.append(f"{os.path.relpath(fp, self.root)} ({size_mb:.1f}MB)")
-                    except OSError:
-                        pass
+        for rel, full in self._all_files():
+            if rel.endswith((".png", ".jpg", ".mp4", ".mov", ".wav", ".mp3")):
+                try:
+                    size_mb = os.path.getsize(full) / 1024 / 1024
+                    if size_mb > 5:
+                        large_assets.append(f"{rel} ({size_mb:.1f}MB)")
+                except OSError:
+                    pass
         if large_assets:
             return False, f"{len(large_assets)} buyuk asset (>5MB): {large_assets[0]} - App Thinning/ODR oneriliyor"
         return True, "Temiz"

@@ -588,6 +588,200 @@ def ui_generate(
         console.print("[yellow]Yeni dosya uretilmedi (tum ekranlar icin dosya zaten mevcut veya ekran bulunamadi).[/yellow]")
 
 
+@ui_app.command("run")
+def ui_run(
+    path: str = typer.Argument(..., help="Proje veya YAML dosya yolu"),
+    device: str = typer.Option(None, "--device", "-d", help="Cihaz ID"),
+    live: bool = typer.Option(True, "--live/--no-live", help="Canli TUI gosterimi"),
+    convert: bool = typer.Option(False, "--convert", help="Nazar YAML'i Maestro formatina cevir"),
+):
+    """YAML UI testlerini Maestro ile cihazda calistir."""
+    import tempfile
+    import yaml as _yaml
+
+    from nazar.executors.device_manager import (
+        is_maestro_installed,
+        list_devices,
+        get_active_device,
+    )
+    from nazar.executors.maestro_executor import MaestroExecutor
+    from nazar.executors.flow_converter import convert_nazar_to_maestro
+    from nazar.tui.runtime_viewer import RuntimeViewer, run_with_viewer
+
+    console.print(Panel("[bold green]NAZAR UI RUN[/bold green] - Maestro ile UI Test", expand=False))
+
+    # 1. Maestro kurulu mu?
+    if not is_maestro_installed():
+        console.print("[red]Maestro kurulu degil.[/red]")
+        console.print()
+        console.print("[bold]Kurmak icin:[/bold]")
+        console.print("  [cyan]brew install maestro[/cyan]  [dim](macOS)[/dim]")
+        console.print('  [cyan]curl -Ls "https://get.maestro.mobile.dev" | bash[/cyan]  [dim](Linux/macOS)[/dim]')
+        raise typer.Exit(1)
+
+    console.print("  [green]Maestro:[/green] kurulu")
+
+    # 2. Bagli cihaz/emulator var mi?
+    devices = list_devices()
+    active_device = get_active_device()
+    device_name = device or ""
+    device_info = {}
+
+    if device:
+        # Kullanici belirli bir cihaz belirtti
+        matched = [d for d in devices if d.get("serial") == device]
+        if matched:
+            device_info = matched[0]
+            device_name = device
+        else:
+            device_name = device
+            device_info = {"name": device, "platform": "?", "status": "?"}
+        console.print(f"  [green]Cihaz:[/green] {device_name}")
+    elif active_device:
+        device_name = active_device.get("serial", "")
+        device_info = active_device
+        console.print(f"  [green]Cihaz:[/green] {device_info.get('name', device_name)}")
+    else:
+        console.print("[yellow]Bagli cihaz veya emulator bulunamadi.[/yellow]")
+        console.print("[dim]Android: adb devices | iOS: xcrun simctl list devices booted[/dim]")
+        raise typer.Exit(1)
+
+    # 3. YAML dosyalarini bul
+    resolved = Path(path).resolve()
+    yaml_files = []
+
+    if resolved.is_file() and resolved.suffix in (".yml", ".yaml"):
+        yaml_files = [str(resolved)]
+    elif resolved.is_dir():
+        nazar_dir = resolved / ".nazar" / "ui-tests"
+        if nazar_dir.exists():
+            yaml_files = sorted(
+                [str(f) for f in nazar_dir.glob("*.yml")]
+                + [str(f) for f in nazar_dir.glob("*.yaml")]
+            )
+        if not yaml_files:
+            yaml_files = sorted(
+                [str(f) for f in resolved.glob("*.yml")]
+                + [str(f) for f in resolved.glob("*.yaml")]
+            )
+
+    if not yaml_files:
+        console.print(f"[red]YAML test dosyasi bulunamadi: {resolved}[/red]")
+        console.print("[dim].nazar/ui-tests/ dizinine bakildi. 'nazar ui init' ile olusturun.[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"\n  [bold]{len(yaml_files)} test dosyasi bulundu[/bold]")
+
+    # 4. Proje dizinini belirle
+    if resolved.is_file():
+        project_path = str(resolved.parent)
+    else:
+        project_path = str(resolved)
+
+    # 5. Testleri calistir
+    total = len(yaml_files)
+    results = []
+
+    for i, yf in enumerate(yaml_files, 1):
+        fname = Path(yf).name
+        console.print(f"\n  [bold cyan][{i}/{total}][/bold cyan] {fname}")
+
+        run_file = yf
+        tmp_file = None
+
+        if convert:
+            try:
+                maestro_content = convert_nazar_to_maestro(yf)
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".yml", prefix="maestro_",
+                    delete=False, dir=str(Path(yf).parent),
+                )
+                tmp.write(maestro_content)
+                tmp.close()
+                tmp_file = tmp.name
+                run_file = tmp.name
+                console.print("    [dim]Maestro formatina cevirildi[/dim]")
+            except Exception as exc:
+                console.print(f"    [yellow]Ceviri hatasi: {exc}[/yellow]")
+
+        step_start = time.time()
+        try:
+            executor = MaestroExecutor(
+                project_path=project_path,
+                yaml_file=run_file,
+                device=device_name or None,
+            )
+
+            if live:
+                # Nazar adimlarini oku (viewer icin)
+                try:
+                    with open(yf, "r", encoding="utf-8") as f:
+                        nazar_data = _yaml.safe_load(f)
+                    steps = nazar_data.get("steps", []) if isinstance(nazar_data, dict) else []
+                except Exception:
+                    steps = []
+
+                if steps:
+                    run_with_viewer(
+                        executor=executor,
+                        steps=steps,
+                        device_info=device_info,
+                        console=console,
+                    )
+                else:
+                    executor.run()
+            else:
+                executor.run()
+
+            summary = executor.get_summary()
+            duration = summary.get("duration", time.time() - step_start)
+            success = summary.get("success", True)
+
+            status = "[green]GECTI[/green]" if success else "[red]BASARISIZ[/red]"
+            console.print(f"    {status} [dim]({duration:.1f}s)[/dim]")
+            results.append({"file": fname, "passed": success, "duration": duration})
+
+        except Exception as exc:
+            duration = time.time() - step_start
+            console.print(f"    [red]HATA: {exc}[/red]")
+            results.append({"file": fname, "passed": False, "duration": duration})
+        finally:
+            if tmp_file and Path(tmp_file).exists():
+                try:
+                    Path(tmp_file).unlink()
+                except OSError:
+                    pass
+
+    # 6. Ozet
+    passed = sum(1 for r in results if r["passed"])
+    failed = total - passed
+    total_dur = sum(r["duration"] for r in results)
+
+    console.print()
+    summary_table = Table(title="UI Test Sonuclari", show_header=True)
+    summary_table.add_column("#", style="dim", width=4)
+    summary_table.add_column("Test", style="white")
+    summary_table.add_column("Sonuc", width=10)
+    summary_table.add_column("Sure", width=8, justify="right")
+
+    for i, r in enumerate(results, 1):
+        status = "[green]GECTI[/green]" if r["passed"] else "[red]KALDI[/red]"
+        summary_table.add_row(str(i), r["file"], status, f"{r['duration']:.1f}s")
+
+    console.print(summary_table)
+    rate = (passed / total * 100) if total > 0 else 0
+    gs = "green" if rate >= 80 else "yellow" if rate >= 60 else "red"
+    console.print(Panel(
+        f"[{gs}]{passed}/{total} gecti ({rate:.0f}%)[/{gs}]  |  "
+        f"[green]{passed} basarili[/green]  |  [red]{failed} basarisiz[/red]  |  "
+        f"[dim]Toplam: {total_dur:.1f}s[/dim]",
+        title="[bold cyan]SONUC[/bold cyan]", border_style="cyan",
+    ))
+
+    if failed > 0:
+        raise typer.Exit(1)
+
+
 @ui_app.command("check")
 def ui_check(
     path: Path = typer.Argument(".", help="Proje dizini"),
