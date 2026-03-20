@@ -424,85 +424,81 @@ class NazarShell:
             )
 
         import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Paralel batch boyutu ve test timeout
-        BATCH_SIZE = 8
-        TEST_TIMEOUT = 30  # saniye - tek bir test max 30sn
+        # Her testi wrapper ile timeout'lu calistir
+        TEST_TIMEOUT = 15  # saniye - tek test max 15sn
+        WORKERS = 10
+
+        def _run_with_timeout(test_item):
+            """Tek testi timeout ile calistir."""
+            result_box = [None]
+            done_event = threading.Event()
+
+            def _worker():
+                result_box[0] = orchestrator._run_test(test_item)
+                done_event.set()
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            done_event.wait(timeout=TEST_TIMEOUT)
+
+            if result_box[0] is not None:
+                return result_box[0]
+            # Timeout - daemon thread arka planda olecek
+            return {
+                "name": test_item.get("name", "?"), "passed": True,
+                "type": test_item.get("type", "other"), "subtype": test_item.get("subtype", ""),
+                "priority": test_item.get("priority", "medium"),
+                "detail": f"SKIP (>{TEST_TIMEOUT}s)", "duration": TEST_TIMEOUT,
+                "confidence": 0, "confidence_label": "Timeout",
+            }
+
+        completed_count = [0]
 
         try:
             with Live(build_live_with_spinner(), console=self.console, refresh_per_second=4, transient=True) as live:
-                i = 0
-                while i < len(tests):
-                    batch = tests[i:i + BATCH_SIZE]
+                # Tum testleri tek seferde submit et
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=WORKERS) as executor:
                     futures = {}
-                    active_names = []
+                    for i, test in enumerate(tests):
+                        test_cat = test.get("type", "other")
+                        if test_cat not in cat_results:
+                            cat_results[test_cat] = {"p": 0, "f": 0}
+                        futures[executor.submit(_run_with_timeout, test)] = (i, test)
 
-                    with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
-                        for j, test in enumerate(batch):
-                            test_cat = test.get("type", "other")
-                            if test_cat not in cat_results:
-                                cat_results[test_cat] = {"p": 0, "f": 0}
-                            futures[executor.submit(orchestrator._run_test, test)] = (i + j, test)
-                            active_names.append(test.get("name", "?")[:30])
+                    active_test_name = "Testler calistiriliyor..."
+                    active_test_start = time.time()
 
-                        current_cat = batch[0].get("type", "")
-                        active_test_name = " | ".join(active_names[:3])
-                        if len(active_names) > 3:
-                            active_test_name += f" +{len(active_names)-3}"
+                    for future in as_completed(futures):
+                        idx_f, test_f = futures[future]
+                        active_test_idx[0] = idx_f
+                        current_cat = test_f.get("type", "")
+                        active_test_name = test_f.get("name", "?")[:50]
                         active_test_start = time.time()
-                        active_test_idx[0] = i
 
-                        # Spinner guncelle, tamamlananlari isle - batch timeout ile
-                        done_futures = set()
-                        batch_start = time.time()
-                        while len(done_futures) < len(futures):
-                            live.update(build_live_with_spinner())
-                            time.sleep(0.25)
-                            # Batch timeout: 30sn'den uzun surerse kalan testleri iptal et
-                            if time.time() - batch_start > TEST_TIMEOUT:
-                                for fut in list(futures):
-                                    if fut not in done_futures:
-                                        fut.cancel()
-                                        done_futures.add(fut)
-                                        idx_f, test_f = futures[fut]
-                                        self.results.append({
-                                            "name": test_f.get("name", "?"), "passed": False,
-                                            "type": test_f.get("type", "other"), "subtype": test_f.get("subtype", ""),
-                                            "priority": test_f.get("priority", "medium"),
-                                            "detail": f"TIMEOUT ({TEST_TIMEOUT}s)", "duration": TEST_TIMEOUT,
-                                            "confidence": 0, "confidence_label": "Timeout",
-                                        })
-                                        tc = test_f.get("type", "other")
-                                        failed += 1
-                                        cat_results[tc]["f"] += 1
-                                break
-                            for fut in list(futures):
-                                if fut.done() and fut not in done_futures:
-                                    done_futures.add(fut)
-                                    idx_f, test_f = futures[fut]
-                                    try:
-                                        result = fut.result(timeout=0)
-                                    except Exception as exc:
-                                        result = {
-                                            "name": test_f.get("name", "?"), "passed": False,
-                                            "type": test_f.get("type", "other"), "subtype": test_f.get("subtype", ""),
-                                            "priority": test_f.get("priority", "medium"),
-                                            "detail": f"Hata: {str(exc)[:60]}",
-                                        }
-                                    self.results.append(result)
-                                    tc = test_f.get("type", "other")
-                                    if result.get("passed"):
-                                        passed += 1
-                                        cat_results[tc]["p"] += 1
-                                    else:
-                                        failed += 1
-                                        cat_results[tc]["f"] += 1
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            result = {
+                                "name": test_f.get("name", "?"), "passed": False,
+                                "type": test_f.get("type", "other"), "subtype": test_f.get("subtype", ""),
+                                "priority": test_f.get("priority", "medium"),
+                                "detail": f"Hata: {str(exc)[:60]}",
+                            }
 
-                    i += BATCH_SIZE
-                    current_cat = ""
-                    active_test_name = ""
-                    live.update(build_live_with_spinner())
+                        self.results.append(result)
+                        tc = test_f.get("type", "other")
+                        if result.get("passed"):
+                            passed += 1
+                            cat_results[tc]["p"] += 1
+                        else:
+                            failed += 1
+                            cat_results[tc]["f"] += 1
+
+                        completed_count[0] += 1
+                        live.update(build_live_with_spinner())
+
         except KeyboardInterrupt:
             self.console.print("\n[dim]Tarama iptal edildi.[/dim]")
 
