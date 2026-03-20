@@ -499,6 +499,19 @@ class TestPlanner:
             {"name": "APPSTORE: No reserved URL scheme conflicts", "type": "appstore", "subtype": "url_scheme_conflict", "priority": "high"},
             {"name": "APPSTORE: No secrets in EXPO_PUBLIC_ variables", "type": "appstore", "subtype": "bundle_secrets", "priority": "critical"},
             {"name": "APPSTORE: No UIWebView usage (deprecated 2020)", "type": "appstore", "subtype": "uiwebview_deprecated", "priority": "critical"},
+            # Preflight - App Store Preflight Kurallari
+            {"name": "APPSTORE: SIWA standard Apple button (Guideline 4.0)", "type": "appstore", "subtype": "siwa_standard_button", "priority": "critical"},
+            {"name": "APPSTORE: No post-SIWA data request (Guideline 4.0)", "type": "appstore", "subtype": "siwa_post_data_request", "priority": "critical"},
+            {"name": "APPSTORE: Minimum functionality check (Guideline 4.2)", "type": "appstore", "subtype": "minimum_functionality", "priority": "high"},
+            {"name": "APPSTORE: No unnecessary personal data required (Guideline 5.1.1)", "type": "appstore", "subtype": "unnecessary_data", "priority": "critical"},
+            {"name": "APPSTORE: Subscription pricing not misleading (Guideline 3.1.2)", "type": "appstore", "subtype": "misleading_pricing", "priority": "critical"},
+            {"name": "APPSTORE: ToS/PP links in subscription paywall (Guideline 3.1.2)", "type": "appstore", "subtype": "missing_tos_pp_paywall", "priority": "critical"},
+            {"name": "APPSTORE: Subscription metadata complete (Guideline 3.1.2)", "type": "appstore", "subtype": "subscription_metadata_info", "priority": "high"},
+            {"name": "APPSTORE: No banned AI references for China (Guideline 5)", "type": "appstore", "subtype": "china_storefront_ai", "priority": "critical"},
+            {"name": "APPSTORE: No competitor platform terms (Guideline 2.3.1)", "type": "appstore", "subtype": "competitor_terms", "priority": "critical"},
+            {"name": "APPSTORE: No Apple trademark misuse (Guideline 5.2.5)", "type": "appstore", "subtype": "apple_trademark", "priority": "critical"},
+            {"name": "APPSTORE: No unused entitlements (Guideline 2.4.5)", "type": "appstore", "subtype": "unused_entitlements", "priority": "high"},
+            {"name": "APPSTORE: Accurate metadata / no device frames in previews (Guideline 2.3.4)", "type": "appstore", "subtype": "accurate_metadata", "priority": "high"},
         ]
         self._add_category("App Store", tests, "critical")
 

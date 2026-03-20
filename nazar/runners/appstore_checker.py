@@ -598,6 +598,346 @@ class AppStoreChecker(BaseRunner):
         return True, "UIWebView kullanimi yok"
 
     # ================================================================
+    # PREFLIGHT - App Store Preflight Kurallari
+    # ================================================================
+
+    def check_siwa_standard_button(self, t: dict) -> Tuple[bool, str]:
+        """SIWA butonu Apple'in standart ASAuthorizationAppleIDButton'ini mi kullaniyor. Guideline 4.0"""
+        # SIWA implementasyonu var mi?
+        siwa_impl = self.scan_pattern(
+            r"(?:ASAuthorization|AppleAuthentication|apple.*sign.?in|signInWithApple|sign_in_with_apple)", limit=50
+        )
+        if not siwa_impl:
+            return True, "SIWA kullanilmiyor"
+        # Standart Apple butonu kullaniliyor mu?
+        standard_button = self.scan_pattern(
+            r"(?:ASAuthorizationAppleIDButton|AppleIDButton|SignInWithAppleButton|AppleAuthenticationButton|SignInWithApple\.Button)", limit=50
+        )
+        # Custom buton kullaniliyor mu? (risk)
+        custom_button = self.scan_pattern(
+            r"""(?:['"]Sign\s+in\s+with\s+Apple['"]|apple.*login.*button|custom.*apple.*button|appleSignIn.*Text|apple.*sign.*label)""", limit=50
+        )
+        if siwa_impl and not standard_button and custom_button:
+            return False, f"SIWA icin custom buton kullaniliyor ({len(custom_button)} yer) - Apple standart ASAuthorizationAppleIDButton ZORUNLU"
+        if siwa_impl and not standard_button:
+            return False, "SIWA implementasyonu var ama standart Apple butonu (ASAuthorizationAppleIDButton) bulunamadi"
+        return True, "SIWA standart buton kullaniliyor"
+
+    def check_siwa_post_data_request(self, t: dict) -> Tuple[bool, str]:
+        """SIWA sonrasi gereksiz name/email isteme - Guideline 4.0"""
+        siwa_impl = self.scan_pattern(
+            r"(?:ASAuthorizationAppleIDCredential|appleIDCredential|apple.*credential|AppleAuthenticationCredential)", limit=50
+        )
+        if not siwa_impl:
+            return True, "SIWA kullanilmiyor"
+        # SIWA sonrasi profil tamamlama ekrani var mi?
+        post_siwa_data = self.scan_pattern(
+            r"(?:completeProfile|askForName|askForEmail|profileSetup|additionalInfo|onboarding.*name|onboarding.*email)", limit=50
+        )
+        if post_siwa_data:
+            return False, f"SIWA sonrasi ek bilgi isteniyor ({len(post_siwa_data)} yer) - Apple zaten name/email saglar, tekrar istemeyin"
+        # Relay email destegi var mi?
+        relay_block = self.scan_pattern(
+            r"(?:privaterelay\.appleid\.com|@privaterelay|relay.*email|hide.*my.*email)", limit=50
+        )
+        email_validation = self.scan_pattern(
+            r"""(?:email.*valid|isValid.*email|email.*regex|email.*pattern)(?!.*privaterelay)""", limit=50
+        )
+        if email_validation and not relay_block:
+            return False, "Email dogrulama var ama Apple relay email destegi yok - privaterelay.appleid.com engellenmemeli"
+        return True, "SIWA veri kullanimi uygun"
+
+    def check_minimum_functionality(self, t: dict) -> Tuple[bool, str]:
+        """Minimum islevsellik kontrolu - Guideline 4.2"""
+        # WebView uygulamasi mi?
+        webview_hits = self.scan_pattern(
+            r"(?:WKWebView|UIWebView|WebView|SFSafariViewController|react-native-webview|WebViewScreen|webview_flutter)", limit=100
+        )
+        # Ekran sayisi
+        screen_hits = self.scan_pattern(
+            r"(?:class\s+\w+.*(?:UIViewController|View\s*:\s*View|Screen|Page)|(?:export\s+(?:default\s+)?(?:function|const)\s+\w+(?:Screen|Page)))", limit=200
+        )
+        # Model/data katmani
+        model_hits = self.scan_pattern(
+            r"(?:CoreData|SwiftData|UserDefaults|Realm|SQLite|AsyncStorage|MMKV|SharedPreferences|Hive|sqflite)", limit=50
+        )
+        # Sadece WebView ve cok az ekran
+        if len(webview_hits) > 3 and len(screen_hits) < 3 and not model_hits:
+            return False, f"Uygulama WebView agirlikli ({len(webview_hits)} hit), {len(screen_hits)} ekran, veri katmani yok - Guideline 4.2 riski"
+        if len(screen_hits) < 2 and not model_hits:
+            return False, f"Sadece {len(screen_hits)} ekran, veri katmani yok - minimum islevsellik yetersiz olabilir"
+        return True, f"{len(screen_hits)} ekran, {'veri katmani var' if model_hits else 'veri katmani yok'}"
+
+    def check_unnecessary_data(self, t: dict) -> Tuple[bool, str]:
+        """Gereksiz kisisel veri zorunlulugu - Guideline 5.1.1"""
+        # Kayit/onboarding formlari
+        registration_forms = self.scan_pattern(
+            r"(?:registration|onboarding|signup|sign.?up|register|createAccount)", limit=50
+        )
+        if not registration_forms:
+            return True, "Kayit formu tespit edilmedi"
+        # Hassas/gereksiz olabilecek alanlar
+        sensitive_fields = []
+        field_patterns = {
+            "phone": r"""(?:phone.*required|required.*phone|phoneNumber.*validator|phone.*isRequired)""",
+            "gender": r"""(?:gender.*required|required.*gender|gender.*validator|gender.*isRequired)""",
+            "birthdate": r"""(?:birth.*required|required.*birth|dob.*required|dateOfBirth.*validator|age.*required)""",
+            "address": r"""(?:address.*required|required.*address|homeAddress.*validator|street.*required)""",
+            "marital": r"""(?:marital.*required|required.*marital|maritalStatus)""",
+        }
+        for field_name, pattern in field_patterns.items():
+            hits = self.scan_pattern(pattern, limit=20)
+            if hits:
+                sensitive_fields.append(field_name)
+        if sensitive_fields:
+            return False, f"Zorunlu tutulan hassas alanlar: {', '.join(sensitive_fields)} - Uygulamanin ana islevi icin gerekliyse sorun yok, degilse OPSIYONEL yapin"
+        return True, "Gereksiz zorunlu veri talebi yok"
+
+    def check_misleading_pricing(self, t: dict) -> Tuple[bool, str]:
+        """Yaniltici abonelik fiyatlandirma gosterimi - Guideline 3.1.2"""
+        # Abonelik UI var mi?
+        paywall = self.scan_pattern(
+            r"(?:paywall|Paywall|subscribe|pricing|subscription.*view|purchase.*view|SubscriptionView|PurchaseView)", limit=50
+        )
+        if not paywall:
+            return True, "Abonelik UI'i tespit edilmedi"
+        # Hesaplanmis fiyat gosterimi (per-month breakdown)
+        calculated_price = self.scan_pattern(
+            r"(?:perMonth|per_month|monthly.*price|price.*month|weekly.*price|price.*week|\/mo|\/month|\/week|dailyPrice|pricePerDay)", limit=50
+        )
+        # Gercek faturalandirma miktari gosterimi
+        billed_amount = self.scan_pattern(
+            r"(?:billedAmount|totalPrice|annualPrice|yearlyPrice|actualPrice|chargedAmount|fullPrice)", limit=50
+        )
+        if calculated_price and not billed_amount:
+            return False, f"Hesaplanmis fiyat gosterimi var ({len(calculated_price)} yer) ama gercek faturalandirma tutari belirgin degil - Guideline 3.1.2: gercek tutar EN BUYUK ve EN BELIRGIN olmali"
+        if calculated_price:
+            return False, f"Hesaplanmis fiyat gosterimi tespit edildi ({len(calculated_price)} yer) - gercek faturalandirma tutarinin daha buyuk font/renk/pozisyonda oldugunu dogrulayin"
+        return True, "Fiyatlandirma gosterimi temiz"
+
+    def check_missing_tos_pp_paywall(self, t: dict) -> Tuple[bool, str]:
+        """Abonelik paywall'unda ToS ve Privacy Policy linkleri zorunlu - Guideline 3.1.2"""
+        # Abonelik/paywall kodu var mi?
+        subscription = self.scan_pattern(
+            r"(?:StoreKit|SKProduct|RevenueCat|Superwall|Purchases\.configure|subscription|paywall|Paywall)", limit=50
+        )
+        if not subscription:
+            return True, "Abonelik sistemi tespit edilmedi"
+        # ToS / Privacy Policy linkleri
+        tos_link = self.scan_pattern(
+            r"(?:terms.*(?:of\s*(?:use|service))|TermsOfService|TermsOfUse|termsURL|tosURL|eula|EULA)", limit=50
+        )
+        pp_link = self.scan_pattern(
+            r"(?:privacy.*policy|PrivacyPolicy|privacyURL|privacyPolicyURL)", limit=50
+        )
+        missing = []
+        if not tos_link:
+            missing.append("Terms of Use/EULA")
+        if not pp_link:
+            missing.append("Privacy Policy")
+        if missing:
+            return False, f"Abonelik paywall'unda eksik: {', '.join(missing)} - Guideline 3.1.2: abonelik ekraninda ToS ve PP linkleri ZORUNLU"
+        return True, "Paywall'da ToS ve PP linkleri mevcut"
+
+    def check_subscription_metadata(self, t: dict) -> Tuple[bool, str]:
+        """Abonelik metadata gereksinimleri - Guideline 3.1.2"""
+        subscription = self.scan_pattern(
+            r"(?:auto.?renew|subscription|StoreKit|SKProduct|RevenueCat|Purchases\.configure)", limit=50
+        )
+        if not subscription:
+            return True, "Abonelik sistemi tespit edilmedi"
+        # Restore Purchases ayri kontrol ediliyor, burada metadata kontrol
+        # Abonelik suresi ve fiyat gosterimi
+        duration_display = self.scan_pattern(
+            r"(?:monthly|yearly|annual|weekly|1\s*month|1\s*year|1\s*week|subscription.*period|duration)", limit=50
+        )
+        price_display = self.scan_pattern(
+            r"(?:price|Price|displayPrice|localizedPrice|formattedPrice|\$|\u20BA|TRY|USD)", limit=50
+        )
+        missing = []
+        if not duration_display:
+            missing.append("abonelik suresi")
+        if not price_display:
+            missing.append("abonelik fiyati")
+        if missing:
+            return False, f"Abonelik UI'da eksik bilgi: {', '.join(missing)} - Guideline 3.1.2: baslik, sure ve fiyat gosterimi ZORUNLU"
+        return True, "Abonelik metadata bilgileri mevcut"
+
+    def check_china_storefront_ai(self, t: dict) -> Tuple[bool, str]:
+        """Cin storefront'ta lisanssiz AI servis referanslari - Guideline 5 (DST)"""
+        # Yasak AI servis isimleri
+        banned_terms = self.scan_pattern(
+            r"""(?i)(?:chatgpt|openai|gpt-4|gpt-4o|gpt4|gemini|bard|claude|anthropic|midjourney|dall-e|dall\xb7e|copilot\s+ai|stable\s+diffusion)""", limit=100
+        )
+        if not banned_terms:
+            return True, "Lisanssiz AI servis referansi yok"
+        # Metadata dosyalarinda mi?
+        metadata_hits = []
+        code_hits = []
+        for hit in banned_terms:
+            f = hit.get("file", "")
+            if any(x in f.lower() for x in ["metadata", "fastlane", "app.json", "info.plist", "description", "keywords"]):
+                metadata_hits.append(hit)
+            else:
+                code_hits.append(hit)
+        if metadata_hits:
+            first = metadata_hits[0]
+            return False, f"{len(metadata_hits)} AI servis referansi METADATA'da: {first['file']}:{first['line']} - Cin storefront'ta aktifse KESIN RED"
+        if code_hits:
+            return False, f"{len(code_hits)} AI servis referansi kodda: {code_hits[0]['file']}:{code_hits[0]['line']} - Cin storefront'ta dagitimdaysa kaldirin veya Cin'i devre disi birakin"
+        return True, "Temiz"
+
+    def check_competitor_terms(self, t: dict) -> Tuple[bool, str]:
+        """Metadata'da rakip platform referanslari - Guideline 2.3.1"""
+        # Metadata dosyalarini tara
+        competitor_pattern = r"""(?i)(?:android|google\s+play|google\s+play\s+store|samsung|galaxy\s+store|huawei|appgallery|amazon\s+appstore|windows\s+store|microsoft\s+store|\.apk|sideload)"""
+        # Metadata / aciklama dosyalari
+        hits = []
+        metadata_files = ["app.json", "fastlane/metadata", "package.json"]
+        for rel, full in self._all_files():
+            fname = os.path.basename(rel).lower()
+            # Metadata, README, description dosyalari
+            if any(x in rel.lower() for x in ["fastlane", "metadata", "description", "keywords", "release_notes", "changelog"]):
+                try:
+                    content = Path(full).read_text(errors="ignore")
+                    for m in re.finditer(competitor_pattern, content):
+                        hits.append({"file": rel, "line": content[:m.start()].count("\n") + 1, "match": m.group()[:40]})
+                except Exception:
+                    pass
+        # app.json description alaninda da kontrol
+        app_json = self.read("app.json")
+        if app_json:
+            for m in re.finditer(competitor_pattern, app_json):
+                hits.append({"file": "app.json", "line": app_json[:m.start()].count("\n") + 1, "match": m.group()[:40]})
+        # package.json description alaninda
+        pkg_json = self.read("package.json")
+        if pkg_json:
+            try:
+                pkg = json.loads(pkg_json)
+                desc = pkg.get("description", "")
+                if re.search(competitor_pattern, desc):
+                    hits.append({"file": "package.json", "line": 1, "match": "description icinde rakip platform terimi"})
+            except Exception:
+                pass
+        if hits:
+            first = hits[0]
+            return False, f"{len(hits)} rakip platform referansi: '{first['match']}' in {first['file']}:{first['line']} - Guideline 2.3.1: rakip platform isimleri metadata'da YASAK"
+        return True, "Rakip platform referansi yok"
+
+    def check_apple_trademark(self, t: dict) -> Tuple[bool, str]:
+        """Apple marka/ticari isim ihlali - Guideline 5.2.5"""
+        # Uygulama adi/aciklamasinda Apple urun isimleri
+        trademark_pattern = r"""(?i)\b(?:iphone|ipad|macbook|apple\s+watch|apple\s+tv|imessage|facetime|siri|airdrop|vision\s+pro|airpods)\b"""
+        hits = []
+        # app.json - name/description alanlari
+        app_json = self.read("app.json")
+        if app_json:
+            try:
+                data = json.loads(app_json)
+                expo = data.get("expo", data)
+                name = expo.get("name", "")
+                desc = expo.get("description", "")
+                slug = expo.get("slug", "")
+                for field_name, field_val in [("name", name), ("description", desc), ("slug", slug)]:
+                    if re.search(trademark_pattern, field_val):
+                        hits.append({"file": "app.json", "field": field_name, "match": re.search(trademark_pattern, field_val).group()})
+            except Exception:
+                pass
+        # Info.plist - CFBundleDisplayName, CFBundleName
+        for rel, full in self._all_files():
+            if os.path.basename(rel) == "Info.plist":
+                try:
+                    content = Path(full).read_text(errors="ignore")
+                    # CFBundleDisplayName veya CFBundleName icinde trademark
+                    name_match = re.search(r'<key>CFBundle(?:Display)?Name</key>\s*<string>(.*?)</string>', content)
+                    if name_match and re.search(trademark_pattern, name_match.group(1)):
+                        hits.append({"file": rel, "field": "CFBundleName", "match": re.search(trademark_pattern, name_match.group(1)).group()})
+                except Exception:
+                    pass
+        # Fastlane metadata
+        for rel, full in self._all_files():
+            if "fastlane" in rel.lower() and ("name" in os.path.basename(rel).lower() or "subtitle" in os.path.basename(rel).lower()):
+                try:
+                    content = Path(full).read_text(errors="ignore")
+                    if re.search(trademark_pattern, content):
+                        hits.append({"file": rel, "field": "metadata", "match": re.search(trademark_pattern, content).group()})
+                except Exception:
+                    pass
+        if hits:
+            first = hits[0]
+            return False, f"{len(hits)} Apple trademark ihlali: '{first['match']}' in {first['file']} ({first.get('field', '')}) - Guideline 5.2.5: uygulama adi/metadata'da Apple urun isimleri YASAK"
+        return True, "Apple trademark ihlali yok"
+
+    def check_unused_entitlements(self, t: dict) -> Tuple[bool, str]:
+        """Kullanilmayan entitlement'lar - Guideline 2.4.5"""
+        # Entitlement dosyalarini bul
+        entitlements_content = ""
+        entitlements_file = ""
+        for rel, full in self._all_files():
+            if rel.endswith(".entitlements"):
+                try:
+                    entitlements_content = Path(full).read_text(errors="ignore")
+                    entitlements_file = rel
+                    break
+                except Exception:
+                    pass
+        if not entitlements_content:
+            return True, "Entitlements dosyasi yok"
+        # Entitlement'lari parse et ve kullanim kontrol et
+        entitlement_checks = {
+            "com.apple.developer.healthkit": (
+                r"(?:HKHealthStore|HealthKit|health_kit)", "HealthKit"
+            ),
+            "com.apple.developer.applesignin": (
+                r"(?:ASAuthorization|SignInWithApple|apple.*sign.?in)", "Sign in with Apple"
+            ),
+            "aps-environment": (
+                r"(?:UNUserNotificationCenter|registerForRemoteNotifications|push.*notification|APNs|firebase.*messaging)", "Push Notifications"
+            ),
+            "com.apple.security.network.server": (
+                r"(?:NWListener|GCDWebServer|Swifter|Vapor|HttpServer|startServer|localhost)", "Network Server"
+            ),
+            "com.apple.developer.icloud": (
+                r"(?:CKContainer|CloudKit|NSPersistentCloudKitContainer|iCloud|ubiquityIdentityToken)", "iCloud"
+            ),
+            "com.apple.developer.siri": (
+                r"(?:INInteraction|SiriKit|IntentHandler|AppIntents|@AppIntent)", "SiriKit"
+            ),
+            "com.apple.security.files.downloads.read-write": (
+                r"(?:Downloads|downloadsDirectory|FileManager.*downloads)", "Downloads Folder"
+            ),
+        }
+        unused = []
+        for entitlement_key, (code_pattern, label) in entitlement_checks.items():
+            if entitlement_key in entitlements_content:
+                code_usage = self.scan_pattern(code_pattern, limit=20)
+                if not code_usage:
+                    unused.append(label)
+        if unused:
+            return False, f"{len(unused)} kullanilmayan entitlement: {', '.join(unused[:3])} - Guideline 2.4.5: Apple gerekce isteyecek veya reddedecek"
+        return True, f"Entitlement'lar kullanilmakta ({entitlements_file})"
+
+    def check_accurate_metadata(self, t: dict) -> Tuple[bool, str]:
+        """App preview video'larda cihaz cercevesi yasak - Guideline 2.3.4"""
+        # Video preview dosyalari var mi?
+        video_previews = []
+        for rel, full in self._all_files():
+            if any(x in rel.lower() for x in ["preview", "promo", "app_preview"]):
+                if rel.endswith((".mov", ".mp4", ".m4v")):
+                    video_previews.append(rel)
+        if not video_previews:
+            return True, "App preview video dosyasi tespit edilmedi"
+        # Video isimlerinde device frame ipucu
+        frame_hints = []
+        for v in video_previews:
+            fname = os.path.basename(v).lower()
+            if any(x in fname for x in ["frame", "device", "mockup", "bezel", "iphone_frame"]):
+                frame_hints.append(v)
+        if frame_hints:
+            return False, f"{len(frame_hints)} video dosyasi cihaz cercevesi icerebilir: {frame_hints[0]} - Guideline 2.3.4: app preview videolari sadece ekran goruntusu icermeli"
+        return True, f"{len(video_previews)} preview video mevcut - cihaz cercevesi icermediginden emin olun"
+
+    # ================================================================
     # ORTA - Inceleme Riski
     # ================================================================
 
@@ -676,6 +1016,19 @@ class AppStoreChecker(BaseRunner):
             "url_scheme_conflict": self.check_url_scheme_conflict,
             "bundle_secrets": self.check_bundle_secrets,
             "uiwebview_deprecated": self.check_uiwebview_deprecated,
+            # Preflight - App Store Preflight Kurallari
+            "siwa_standard_button": self.check_siwa_standard_button,
+            "siwa_post_data_request": self.check_siwa_post_data_request,
+            "minimum_functionality": self.check_minimum_functionality,
+            "unnecessary_data": self.check_unnecessary_data,
+            "misleading_pricing": self.check_misleading_pricing,
+            "missing_tos_pp_paywall": self.check_missing_tos_pp_paywall,
+            "subscription_metadata_info": self.check_subscription_metadata,
+            "china_storefront_ai": self.check_china_storefront_ai,
+            "competitor_terms": self.check_competitor_terms,
+            "apple_trademark": self.check_apple_trademark,
+            "unused_entitlements": self.check_unused_entitlements,
+            "accurate_metadata": self.check_accurate_metadata,
             # Orta
             "voiceover_support": self.check_voiceover_support,
             "orientation_support": self.check_orientation_support,

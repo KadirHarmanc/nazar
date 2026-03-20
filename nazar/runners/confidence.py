@@ -188,6 +188,19 @@ CONFIDENCE_SCORES = {
     "url_scheme_conflict": 95,
     "bundle_secrets": 90,
     "uiwebview_deprecated": 95,
+    # Preflight - App Store Preflight Kurallari
+    "siwa_standard_button": 85,
+    "siwa_post_data_request": 80,
+    "minimum_functionality": 70,
+    "unnecessary_data": 75,
+    "misleading_pricing": 80,
+    "missing_tos_pp_paywall": 90,
+    "subscription_metadata_info": 85,
+    "china_storefront_ai": 95,
+    "competitor_terms": 90,
+    "apple_trademark": 90,
+    "unused_entitlements": 85,
+    "accurate_metadata": 70,
 
     # AST Analysis (Python)
     "dangerous_calls": 98,
