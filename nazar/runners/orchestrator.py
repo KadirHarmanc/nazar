@@ -30,6 +30,7 @@ from nazar.analyzers.i18n_analyzer import I18nAnalyzer
 from nazar.analyzers.responsive_analyzer import ResponsiveAnalyzer
 from nazar.analyzers.performance_analyzer import PerformanceStaticAnalyzer
 from nazar.analyzers.visual_regression import VisualRegressionAnalyzer
+from nazar.runners.compliance_checker import ComplianceChecker
 
 # "How to Fix" mesajlari
 HOW_TO_FIX = {
@@ -262,6 +263,80 @@ HOW_TO_FIX = {
         "cozum": "__snapshots__ dizinini test dosyalarinin yanina yerlestirin",
         "quick_fix": "Her __tests__ dizininin icine bir __snapshots__ dizini olusturun",
     },
+    # Compliance - OWASP
+    "owasp_full": {
+        "sorun": "OWASP Top 10 kategorilerinde risk tespit edildi",
+        "cozum": "OWASP Top 10 rehberine gore guvenlik iyilestirmeleri yapin",
+        "quick_fix": "Detayli sonuclarda belirtilen kategorilerdeki bulgulari inceleyin",
+    },
+    # Compliance - GDPR/KVKK
+    "gdpr_consent_mechanism": {
+        "sorun": "Kullanici riza/onay mekanizmasi bulunamadi",
+        "cozum": "GDPR/KVKK uyumu icin consent form veya banner ekleyin",
+        "quick_fix": "react-cookie-consent veya benzeri bir kutuphane kurun",
+    },
+    "gdpr_data_deletion": {
+        "sorun": "Kullanici verisi silme mekanizmasi eksik",
+        "cozum": "Hesap silme veya veri temizleme endpoint'i ekleyin (Right to Erasure)",
+        "quick_fix": "DELETE /api/users/:id endpoint'i olusturun",
+    },
+    "gdpr_privacy_policy": {
+        "sorun": "Gizlilik politikasi/KVKK aydinlatma metni referansi eksik",
+        "cozum": "Uygulamada privacy policy sayfasi veya linki ekleyin",
+        "quick_fix": "Footer veya Settings'e Privacy Policy linki ekleyin",
+    },
+    "gdpr_pii_logging_prevention": {
+        "sorun": "Kisisel veri (PII) log'lara yaziliyor",
+        "cozum": "Log ifadelerinden email, telefon, sifre gibi PII verileri kaldirin",
+        "quick_fix": "Log satirlarini grep ile bulun ve PII'leri maskeleyin",
+    },
+    # Compliance - SOC2
+    "soc2_authentication": {
+        "sorun": "Kimlik dogrulama mekanizmasi bulunamadi",
+        "cozum": "Auth kutuphanesi (passport, auth0, next-auth vb.) ekleyin",
+        "quick_fix": "npm install next-auth veya benzeri auth paketi kurun",
+    },
+    "soc2_access_control": {
+        "sorun": "Erisim kontrolu/yetkilendirme mekanizmasi eksik",
+        "cozum": "RBAC veya ABAC tabanli yetkilendirme sistemi ekleyin",
+        "quick_fix": "Middleware seviyesinde role/permission kontrolu ekleyin",
+    },
+    "soc2_audit_logging": {
+        "sorun": "Denetim loglama mekanizmasi bulunamadi",
+        "cozum": "Kullanici eylemlerini loglayan bir audit trail sistemi ekleyin",
+        "quick_fix": "winston/pino logger kurun ve CRUD islemlerini loglayin",
+    },
+    "soc2_encryption_in_transit": {
+        "sorun": "HTTP (sifresiz) baglanti kullaniliyor",
+        "cozum": "Tum URL'leri HTTPS'e cevirin, HSTS header ekleyin",
+        "quick_fix": "http:// ile baslayan URL'leri https:// ile degistirin",
+    },
+    "soc2_error_handling": {
+        "sorun": "Stack trace veya hata detayi kullaniciya gosteriliyor",
+        "cozum": "Production'da generic hata mesajlari gosterin, detaylari loglayin",
+        "quick_fix": "ErrorBoundary ekleyin, res.send(err.stack) satirlarini kaldirin",
+    },
+    # Compliance - PCI-DSS
+    "pci_no_credit_card_in_code": {
+        "sorun": "Kaynak kodda kredi karti numarasi tespit edildi",
+        "cozum": "Gercek kart numaralarini koddan kaldirin, test icin test kartlari kullanin",
+        "quick_fix": "4242424242424242 gibi Stripe test kartlarini kullanin",
+    },
+    "pci_no_pan_storage": {
+        "sorun": "Kredi karti numarasi saklanma riski tespit edildi",
+        "cozum": "Kart bilgilerini tokenize edin (Stripe, Braintree vb. kullanin)",
+        "quick_fix": "Stripe PaymentElement veya CardElement kullanin",
+    },
+    "pci_tls_enforcement": {
+        "sorun": "TLS zorunlulugu saglanmiyor",
+        "cozum": "Tum iletisimi HTTPS uzerinden yapin",
+        "quick_fix": "http:// URL'leri https:// ile degistirin",
+    },
+    "pci_input_validation_payment": {
+        "sorun": "Odeme formu girdi dogrulama eksik",
+        "cozum": "Odeme form alanlarina validation ekleyin (Luhn, CVV format vb.)",
+        "quick_fix": "Stripe Elements veya Zod schema ile validation ekleyin",
+    },
 }
 
 # 50+ Secret Pattern'leri
@@ -451,6 +526,12 @@ class TestOrchestrator(BaseRunner):
             self._visual_regression = self._share_cache(VisualRegressionAnalyzer(str(self.root)))
         return self._visual_regression
 
+    @property
+    def compliance_checker(self) -> ComplianceChecker:
+        if not hasattr(self, '_compliance_checker') or self._compliance_checker is None:
+            self._compliance_checker = self._share_cache(ComplianceChecker(str(self.root)))
+        return self._compliance_checker
+
     def run_all(self) -> List[Dict]:
         for test in self.plan.get("tests", []):
             self.results.append(self._run_test(test))
@@ -518,6 +599,7 @@ class TestOrchestrator(BaseRunner):
                 "responsive": self._responsive,
                 "perf_static": self._run_perf_static,
                 "visual_regression": self._visual_regression_check,
+                "compliance": self._compliance,
             }
             fn = runner_map.get(t)
             passed, detail = fn(test) if fn else (True, "SKIP")
@@ -1209,6 +1291,10 @@ class TestOrchestrator(BaseRunner):
     # ---- Visual Regression ----
     def _visual_regression_check(self, t: dict) -> Tuple[bool, str]:
         return self.visual_regression.run_check(t.get("subtype", ""), t)
+
+    # ---- Compliance ----
+    def _compliance(self, t: dict) -> Tuple[bool, str]:
+        return self.compliance_checker.run_check(t.get("subtype", ""), t)
 
     # ---- Docker ----
     def _docker(self, t: dict) -> Tuple[bool, str]:

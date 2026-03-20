@@ -27,6 +27,7 @@ class ScanCache:
         self.history_file = self.nazar_dir / "scan-history.json"
         self.hashes_file = self.nazar_dir / "file-hashes.json"
         self.last_scan_file = self.nazar_dir / "last-scan.json"
+        self.baseline_file = self.nazar_dir / "baseline.json"
         self.cache_dir = self.nazar_dir / "cache"
 
     def ensure_dir(self):
@@ -247,6 +248,152 @@ class ScanCache:
             "new_issues_count": len(new_issues),
             "new_issues": [{"name": r["name"], "detail": r.get("detail", "")} for r in new_issues[:10]],
             "time_since": self.time_since_last_scan(),
+        }
+
+    # === Baseline Yonetimi ===
+
+    def has_baseline(self) -> bool:
+        """Baseline dosyasi mevcut mu?"""
+        return self.baseline_file.exists()
+
+    def save_baseline(self, results: List[dict]):
+        """Mevcut tarama sonuclarini baseline olarak kaydet.
+
+        Baseline, projenin kabul edilen durumunu temsil eder.
+        Sonraki taramalar bu baseline ile karsilastirilarak
+        yeni sorunlar (regression) ve duzeltmeler (improvement) tespit edilir.
+        """
+        self.ensure_dir()
+
+        passed = sum(1 for r in results if r.get("passed"))
+        total = len(results)
+        rate = (passed / total * 100) if total else 0
+
+        # Kategori ozet
+        categories = {}
+        for r in results:
+            cat = r.get("type", "other")
+            if cat not in categories:
+                categories[cat] = {"passed": 0, "failed": 0}
+            if r.get("passed"):
+                categories[cat]["passed"] += 1
+            else:
+                categories[cat]["failed"] += 1
+
+        baseline_data = {
+            "timestamp": datetime.now().isoformat(),
+            "grade": self._grade(rate),
+            "pass_rate": round(rate, 1),
+            "passed": passed,
+            "failed": total - passed,
+            "total": total,
+            "categories": categories,
+            "results": results,
+        }
+
+        self.baseline_file.write_text(
+            json.dumps(baseline_data, indent=2, ensure_ascii=False)
+        )
+
+    def get_baseline(self) -> Optional[dict]:
+        """Baseline verisini oku."""
+        if not self.baseline_file.exists():
+            return None
+        try:
+            return json.loads(self.baseline_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def compare_with_baseline(self, current_results: List[dict]) -> Dict:
+        """Mevcut sonuclari baseline ile karsilastir.
+
+        Returns:
+            Dict:
+                - regressions: Baseline'da gecen ama simdi kalan testler
+                - improvements: Baseline'da kalan ama simdi gecen testler
+                - new_issues: Baseline'da olmayan yeni basarisiz testler
+                - baseline_grade: Baseline notu
+                - baseline_rate: Baseline basari orani
+                - current_grade: Mevcut not
+                - current_rate: Mevcut basari orani
+                - delta: Oran farki
+                - has_regressions: bool - gerileme var mi
+        """
+        baseline = self.get_baseline()
+        if not baseline:
+            return {
+                "regressions": [],
+                "improvements": [],
+                "new_issues": [],
+                "baseline_grade": "?",
+                "baseline_rate": 0,
+                "current_grade": "?",
+                "current_rate": 0,
+                "delta": 0,
+                "has_regressions": False,
+                "error": "Baseline bulunamadi",
+            }
+
+        baseline_results = baseline.get("results", [])
+
+        # Subtype bazli eslestirme
+        baseline_passed = {r["subtype"]: r for r in baseline_results if r.get("passed")}
+        baseline_failed = {r["subtype"]: r for r in baseline_results if not r.get("passed")}
+        baseline_all = {r["subtype"] for r in baseline_results}
+
+        current_passed = {r["subtype"]: r for r in current_results if r.get("passed")}
+        current_failed = {r["subtype"]: r for r in current_results if not r.get("passed")}
+
+        # Regressions: Baseline'da PASSED ama simdi FAILED
+        regressions = []
+        for subtype, r in current_failed.items():
+            if subtype in baseline_passed:
+                regressions.append({
+                    "name": r.get("name", ""),
+                    "subtype": subtype,
+                    "type": r.get("type", ""),
+                    "priority": r.get("priority", "medium"),
+                    "detail": r.get("detail", ""),
+                })
+
+        # Improvements: Baseline'da FAILED ama simdi PASSED
+        improvements = []
+        for subtype, r in current_passed.items():
+            if subtype in baseline_failed:
+                improvements.append({
+                    "name": r.get("name", ""),
+                    "subtype": subtype,
+                    "type": r.get("type", ""),
+                    "detail": r.get("detail", ""),
+                })
+
+        # New issues: Baseline'da HIC OLMAYAN ve simdi FAILED
+        new_issues = []
+        for subtype, r in current_failed.items():
+            if subtype not in baseline_all:
+                new_issues.append({
+                    "name": r.get("name", ""),
+                    "subtype": subtype,
+                    "type": r.get("type", ""),
+                    "priority": r.get("priority", "medium"),
+                    "detail": r.get("detail", ""),
+                })
+
+        current_passed_count = sum(1 for r in current_results if r.get("passed"))
+        current_total = len(current_results)
+        current_rate = (current_passed_count / current_total * 100) if current_total else 0
+
+        return {
+            "regressions": regressions,
+            "improvements": improvements,
+            "new_issues": new_issues,
+            "baseline_grade": baseline.get("grade", "?"),
+            "baseline_rate": baseline.get("pass_rate", 0),
+            "current_grade": self._grade(current_rate),
+            "current_rate": round(current_rate, 1),
+            "delta": round(current_rate - baseline.get("pass_rate", 0), 1),
+            "has_regressions": len(regressions) > 0,
+            "baseline_timestamp": baseline.get("timestamp", ""),
         }
 
     # === Cache Temizlik ===

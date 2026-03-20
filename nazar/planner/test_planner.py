@@ -166,6 +166,10 @@ class TestPlanner:
         if self._should_run("docker"):
             self._plan_docker_tests()
 
+        # Compliance (OWASP, GDPR/KVKK, SOC2, PCI-DSS)
+        if self._should_run("compliance"):
+            self._plan_compliance_tests()
+
         self.plan.total_tests = len(self.plan.tests)
         self.plan.estimated_duration = self._estimate_duration()
         return self.plan
@@ -668,8 +672,48 @@ class TestPlanner:
         ]
         self._add_category("Docker/Infra", tests, "medium")
 
+    def _plan_compliance_tests(self):
+        """Compliance framework kontrolleri - OWASP, GDPR/KVKK, SOC2, PCI-DSS."""
+        tests = [
+            # OWASP Top 10 Mapping
+            {"name": "COMPLIANCE: OWASP Top 10 tam tarama", "type": "compliance", "subtype": "owasp_full", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A01 - Broken Access Control", "type": "compliance", "subtype": "owasp_A01_broken_access_control", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A02 - Cryptographic Failures", "type": "compliance", "subtype": "owasp_A02_cryptographic_failures", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A03 - Injection", "type": "compliance", "subtype": "owasp_A03_injection", "priority": "critical"},
+            {"name": "COMPLIANCE: OWASP A05 - Security Misconfiguration", "type": "compliance", "subtype": "owasp_A05_security_misconfiguration", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A07 - Auth Failures", "type": "compliance", "subtype": "owasp_A07_auth_failures", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A08 - Integrity Failures", "type": "compliance", "subtype": "owasp_A08_integrity_failures", "priority": "high"},
+            {"name": "COMPLIANCE: OWASP A09 - Logging Failures", "type": "compliance", "subtype": "owasp_A09_logging_failures", "priority": "medium"},
+            {"name": "COMPLIANCE: OWASP A10 - SSRF", "type": "compliance", "subtype": "owasp_A10_ssrf", "priority": "high"},
+            # GDPR / KVKK
+            {"name": "COMPLIANCE: GDPR/KVKK tam tarama", "type": "compliance", "subtype": "gdpr_full", "priority": "high"},
+            {"name": "COMPLIANCE: GDPR - Riza mekanizmasi (consent)", "type": "compliance", "subtype": "gdpr_consent_mechanism", "priority": "high"},
+            {"name": "COMPLIANCE: GDPR - Veri silme yetenegi", "type": "compliance", "subtype": "gdpr_data_deletion", "priority": "high"},
+            {"name": "COMPLIANCE: GDPR - Gizlilik politikasi linki", "type": "compliance", "subtype": "gdpr_privacy_policy", "priority": "medium"},
+            {"name": "COMPLIANCE: GDPR - Cerez onay mekanizmasi", "type": "compliance", "subtype": "gdpr_cookie_consent", "priority": "medium"},
+            {"name": "COMPLIANCE: GDPR - Duragan veri sifreleme", "type": "compliance", "subtype": "gdpr_data_encryption_at_rest", "priority": "high"},
+            {"name": "COMPLIANCE: GDPR - PII loglama engelleme", "type": "compliance", "subtype": "gdpr_pii_logging_prevention", "priority": "high"},
+            # SOC2 Basics
+            {"name": "COMPLIANCE: SOC2 tam tarama", "type": "compliance", "subtype": "soc2_full", "priority": "high"},
+            {"name": "COMPLIANCE: SOC2 - Kimlik dogrulama", "type": "compliance", "subtype": "soc2_authentication", "priority": "high"},
+            {"name": "COMPLIANCE: SOC2 - Erisim kontrolu", "type": "compliance", "subtype": "soc2_access_control", "priority": "high"},
+            {"name": "COMPLIANCE: SOC2 - Denetim loglama", "type": "compliance", "subtype": "soc2_audit_logging", "priority": "medium"},
+            {"name": "COMPLIANCE: SOC2 - HTTPS zorunlulugu", "type": "compliance", "subtype": "soc2_encryption_in_transit", "priority": "high"},
+            {"name": "COMPLIANCE: SOC2 - Hata yonetimi", "type": "compliance", "subtype": "soc2_error_handling", "priority": "medium"},
+            {"name": "COMPLIANCE: SOC2 - Bagimlilk guncelleme", "type": "compliance", "subtype": "soc2_dependency_updates", "priority": "medium"},
+            # PCI-DSS Basics
+            {"name": "COMPLIANCE: PCI-DSS tam tarama", "type": "compliance", "subtype": "pci_full", "priority": "high"},
+            {"name": "COMPLIANCE: PCI-DSS - Kodda kredi karti numarasi", "type": "compliance", "subtype": "pci_no_credit_card_in_code", "priority": "critical"},
+            {"name": "COMPLIANCE: PCI-DSS - PAN saklama kontrolu", "type": "compliance", "subtype": "pci_no_pan_storage", "priority": "critical"},
+            {"name": "COMPLIANCE: PCI-DSS - TLS zorunlulugu", "type": "compliance", "subtype": "pci_tls_enforcement", "priority": "high"},
+            {"name": "COMPLIANCE: PCI-DSS - Odeme formu girdi dogrulama", "type": "compliance", "subtype": "pci_input_validation_payment", "priority": "high"},
+            # Ozet
+            {"name": "COMPLIANCE: Tum framework ozet raporu", "type": "compliance", "subtype": "compliance_summary", "priority": "high"},
+        ]
+        self._add_category("Compliance", tests, "high")
+
     def _estimate_duration(self) -> str:
-        weights = {"api": 3, "security": 1, "code_quality": 2, "visual": 1, "dependency": 5}
+        weights = {"api": 3, "security": 1, "code_quality": 2, "visual": 1, "dependency": 5, "compliance": 2}
         total = sum(weights.get(t["type"], 1) for t in self.plan.tests)
         if total < 60:
             return f"{total}s"

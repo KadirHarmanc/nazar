@@ -45,6 +45,10 @@ HELP_TEXT = """
   [cyan]categories[/cyan]    [dim]|[/dim] [cyan]cat[/cyan]         Kategori listesi
   [cyan]stats[/cyan]                        Genel istatistikler
   [cyan]profiles[/cyan]      [dim]|[/dim] [cyan]profiller[/cyan]   Test profilleri
+  [cyan]rule[/cyan]          [dim]|[/dim] [cyan]kural[/cyan]       Kural yonetimi (olustur, dogrula, test, listele)
+  [cyan]batch <y1> <y2>[/cyan]               Birden fazla projeyi tara
+  [cyan]baseline save[/cyan]                Mevcut taramayi baseline olarak kaydet
+  [cyan]baseline check[/cyan]               Baseline ile karsilastir (gerileme kontrolu)
   [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Maestro ile UI test calistir
   [cyan]live[/cyan]          [dim]|[/dim] [cyan]serve[/cyan]       Canli web raporu (localhost:5555)
   [cyan]update[/cyan]        [dim]|[/dim] [cyan]guncelle[/cyan]    Son versiyona guncelle
@@ -60,8 +64,8 @@ HELP_TEXT = """
 
 
 class NazarCompleter(Completer):
-    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "run", "help", "quit",
-                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "calistir", "yardim", "cikis", "cat"]
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "run", "rule", "batch", "baseline", "help", "quit",
+                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "calistir", "kural", "toplu", "referans", "yardim", "cikis", "cat"]
     FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
     FORMATS = ["html", "json", "sarif", "junit", "markdown"]
 
@@ -171,6 +175,9 @@ class NazarShell:
             "categories": self._categories, "kategoriler": self._categories, "c": self._categories, "cat": self._categories,
             "profiles": self._profiles, "profiller": self._profiles,
             "stats": self._stats, "istatistik": self._stats,
+            "rule": lambda: self._rule(arg), "kural": lambda: self._rule(arg),
+            "batch": lambda: self._batch(arg), "toplu": lambda: self._batch(arg),
+            "baseline": lambda: self._baseline(arg), "referans": lambda: self._baseline(arg),
             "run": self._run_ui, "calistir": self._run_ui,
             "live": self._live, "serve": self._live,
             "clear": self._clear, "temizle": self._clear,
@@ -1215,6 +1222,397 @@ class NazarShell:
             self.console.print(f"  [red]Maestro bulunamadi: {maestro_bin}[/red]")
         except Exception as e:
             self.console.print(f"  [red]Hata: {e}[/red]")
+
+    def _rule(self, arg):
+        """Kural yonetim menusu."""
+        from rich.table import Table
+        from nazar.tools.rule_builder import RuleBuilder
+
+        sub = arg.strip().lower() if arg else ""
+
+        if sub == "list" or sub == "listele":
+            # Kural listesi
+            all_rules = RuleBuilder.list_rules()
+            if not all_rules:
+                self.console.print("\n[yellow]  Hic kural bulunamadi.[/yellow]")
+                self.console.print("  [dim]Ozel kural olusturmak icin: rule create[/dim]\n")
+                return
+
+            builtin = [r for r in all_rules if r["source"] == "builtin"]
+            custom = [r for r in all_rules if r["source"] != "builtin"]
+
+            if builtin:
+                table = Table(title=f"Yerlesik Kurallar ({len(builtin)})")
+                table.add_column("ID", style="cyan")
+                table.add_column("Severity", style="yellow")
+                table.add_column("Aciklama", style="white")
+                for r in builtin:
+                    sev = r["severity"]
+                    ss = {"critical": "bold red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(sev, "dim")
+                    table.add_row(r["id"], f"[{ss}]{sev.upper()}[/{ss}]", r["message"])
+                self.console.print(table)
+
+            if custom:
+                self.console.print()
+                table = Table(title=f"Ozel Kurallar ({len(custom)})")
+                table.add_column("ID", style="cyan")
+                table.add_column("Severity", style="yellow")
+                table.add_column("Kaynak", style="dim")
+                table.add_column("Aciklama", style="white")
+                for r in custom:
+                    sev = r["severity"]
+                    ss = {"critical": "bold red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(sev, "dim")
+                    table.add_row(r["id"], f"[{ss}]{sev.upper()}[/{ss}]", r["source"], r["message"])
+                self.console.print(table)
+
+            self.console.print(f"\n  [bold]Toplam: {len(all_rules)} kural ({len(builtin)} yerlesik + {len(custom)} ozel)[/bold]\n")
+
+        elif sub == "create" or sub == "olustur":
+            # Interaktif kural olusturma
+            self.console.print("\n[bold cyan]  KURAL OLUSTUR[/bold cyan]\n")
+            builder = RuleBuilder()
+            try:
+                rule = builder.create_rule()
+            except ValueError as e:
+                self.console.print(f"\n[red]  Hata: {e}[/red]\n")
+                return
+            except (KeyboardInterrupt, EOFError):
+                self.console.print("\n[dim]  Iptal edildi.[/dim]\n")
+                return
+
+            errors = builder.validate_rule(rule)
+            if errors:
+                self.console.print("\n[red]  Dogrulama hatalari:[/red]")
+                for err in errors:
+                    self.console.print(f"    [red]- {err}[/red]")
+                return
+
+            # Kayit yolunu sor
+            default_path = os.path.join(os.path.expanduser("~"), ".nazar", "rules", "custom-rules.yaml")
+            try:
+                out_path = self.session.prompt(
+                    HTML(f'<style fg="#6366f1"><b>Kayit yolu</b></style><style fg="#475569"> [{default_path}]&gt; </style>')
+                )
+                out_path = out_path.strip() or default_path
+            except (KeyboardInterrupt, EOFError):
+                out_path = default_path
+
+            saved = builder.save_rule(rule, out_path)
+            self.console.print(f"\n[green]  Kural kaydedildi: {saved}[/green]\n")
+
+        elif sub.startswith("validate") or sub.startswith("dogrula"):
+            # Kural dosyasi dogrulama
+            parts = sub.split(None, 1)
+            file_path = parts[1] if len(parts) > 1 else ""
+            if not file_path:
+                try:
+                    file_path = self.session.prompt(
+                        HTML('<style fg="#6366f1"><b>YAML dosya yolu</b></style><style fg="#475569">&gt; </style>')
+                    ).strip()
+                except (KeyboardInterrupt, EOFError):
+                    return
+            if not file_path:
+                self.console.print("[yellow]  Dosya yolu gerekli.[/yellow]")
+                return
+
+            from nazar.tools.rule_validator import validate_yaml_rules
+            errors = validate_yaml_rules(os.path.expanduser(file_path))
+            if not errors:
+                self.console.print(f"\n[green]  Dosya gecerli: {file_path}[/green]\n")
+            else:
+                self.console.print(f"\n[red]  {len(errors)} hata bulundu:[/red]")
+                for i, err in enumerate(errors, 1):
+                    color = "yellow" if err.startswith("Uyari:") else "red"
+                    self.console.print(f"    [{color}]{i}. {err}[/{color}]")
+                self.console.print()
+
+        elif sub.startswith("test"):
+            # Kural test
+            parts = sub.split(None, 1)
+            file_path = parts[1] if len(parts) > 1 else ""
+            if not file_path:
+                try:
+                    file_path = self.session.prompt(
+                        HTML('<style fg="#6366f1"><b>YAML kural dosyasi</b></style><style fg="#475569">&gt; </style>')
+                    ).strip()
+                except (KeyboardInterrupt, EOFError):
+                    return
+            if not file_path:
+                self.console.print("[yellow]  Dosya yolu gerekli.[/yellow]")
+                return
+
+            proj = self.project_path
+            if not proj:
+                try:
+                    proj = self.session.prompt(
+                        HTML('<style fg="#6366f1"><b>Proje dizini</b></style><style fg="#475569">&gt; </style>')
+                    ).strip()
+                except (KeyboardInterrupt, EOFError):
+                    return
+            if not proj:
+                self.console.print("[yellow]  Proje yolu gerekli.[/yellow]")
+                return
+
+            file_path = os.path.expanduser(file_path)
+            proj = os.path.expanduser(proj)
+
+            from nazar.tools.rule_validator import validate_yaml_rules
+            verrs = validate_yaml_rules(file_path)
+            real_errors = [e for e in verrs if not e.startswith("Uyari:")]
+            if real_errors:
+                self.console.print(f"\n[red]  Kural dosyasi gecersiz: {len(real_errors)} hata[/red]")
+                for err in real_errors:
+                    self.console.print(f"    [red]- {err}[/red]")
+                return
+
+            try:
+                import yaml as _yaml
+                with open(file_path, "r") as f:
+                    data = _yaml.safe_load(f)
+                rules = data.get("rules", []) if data else []
+            except Exception as e:
+                self.console.print(f"\n[red]  Dosya okunamadi: {e}[/red]\n")
+                return
+
+            total_matches = 0
+            for rule in rules:
+                rid = rule.get("id", "?")
+                self.console.print(f"\n  [bold cyan]Kural: {rid}[/bold cyan] [dim]({rule.get('severity', 'medium')})[/dim]")
+                try:
+                    matches = RuleBuilder.test_rule(rule, proj)
+                except Exception as e:
+                    self.console.print(f"    [red]Hata: {e}[/red]")
+                    continue
+
+                if matches:
+                    self.console.print(f"    [yellow]{len(matches)} eslesme:[/yellow]")
+                    for m in matches[:10]:
+                        self.console.print(f"      [dim]{m['file']}:{m['line']}[/dim] {m['content'][:60]}")
+                    if len(matches) > 10:
+                        self.console.print(f"      [dim]...ve {len(matches) - 10} daha[/dim]")
+                    total_matches += len(matches)
+                else:
+                    self.console.print("    [green]Eslesme yok.[/green]")
+
+            self.console.print(f"\n  [bold]Toplam: {total_matches} eslesme ({len(rules)} kural)[/bold]\n")
+
+        else:
+            # Alt komut menusu goster
+            self.console.print("\n[bold cyan]  KURAL YONETIMI[/bold cyan]\n")
+            self.console.print("  [cyan]rule list[/cyan]      [dim]|[/dim] [cyan]kural listele[/cyan]    Tum kurallari listele")
+            self.console.print("  [cyan]rule create[/cyan]    [dim]|[/dim] [cyan]kural olustur[/cyan]    Yeni kural olustur")
+            self.console.print("  [cyan]rule validate[/cyan]  [dim]|[/dim] [cyan]kural dogrula[/cyan]    YAML dosyasini dogrula")
+            self.console.print("  [cyan]rule test[/cyan]      [dim]|[/dim] [cyan]kural test[/cyan]       Kurali proje uzerinde test et")
+            self.console.print()
+
+    def _batch(self, arg):
+        """Birden fazla projeyi sirayla tara."""
+        if not arg.strip():
+            self.console.print("\n[yellow]  Kullanim: batch <yol1> <yol2> ...[/yellow]")
+            self.console.print("[dim]  Ornek: batch ~/Desktop/Proje1 ~/Desktop/Proje2[/dim]\n")
+            return
+
+        paths = arg.strip().split()
+        resolved_paths = []
+        for p in paths:
+            expanded = os.path.expanduser(p)
+            # /desktop/x -> ~/Desktop/x otomatik cevir
+            if expanded.lower().startswith("/desktop/"):
+                expanded = os.path.expanduser("~/Desktop/" + expanded[9:])
+            elif expanded.lower().startswith("desktop/"):
+                expanded = os.path.expanduser("~/Desktop/" + expanded[8:])
+            rp = Path(expanded).resolve()
+            if not rp.exists():
+                # Desktop'ta dene
+                desktop_try = Path(os.path.expanduser(f"~/Desktop/{p}")).resolve()
+                if desktop_try.exists():
+                    rp = desktop_try
+                else:
+                    self.console.print(f"  [red]Bulunamadi: {p}[/red]")
+                    continue
+            resolved_paths.append(str(rp))
+
+        if not resolved_paths:
+            self.console.print("[red]  Gecerli proje yolu bulunamadi.[/red]\n")
+            return
+
+        from nazar.batch.scanner import BatchScanner
+        from rich.table import Table
+        from rich import box
+
+        self.console.print(f"\n  [bold magenta]BATCH TARAMA[/bold magenta] - {len(resolved_paths)} proje\n")
+        for i, p in enumerate(resolved_paths, 1):
+            self.console.print(f"  [dim][{i}/{len(resolved_paths)}][/dim] {Path(p).name}")
+        self.console.print()
+
+        scanner = BatchScanner(resolved_paths, profile="ci")
+        results = scanner.scan_all()
+
+        # Sonuc tablosu
+        table = Table(title="Batch Tarama Sonuclari", box=box.ROUNDED)
+        table.add_column("Proje", style="cyan")
+        table.add_column("Not", width=5, justify="center")
+        table.add_column("Oran", width=8, justify="right")
+        table.add_column("Gecen", width=6, justify="right", style="green")
+        table.add_column("Kalan", width=6, justify="right", style="red")
+        table.add_column("Sure", width=8, justify="right", style="dim")
+        table.add_column("Durum", width=15)
+
+        for path_key, data in results.items():
+            grade = data["grade"]
+            gs = "green" if data["pass_rate"] >= 80 else "yellow" if data["pass_rate"] >= 60 else "red"
+            if data.get("error"):
+                status = "[red]HATA[/red]"
+            else:
+                status = f"[{gs}]OK[/{gs}]"
+            table.add_row(
+                data["project_name"],
+                f"[{gs}]{grade}[/{gs}]",
+                f"[{gs}]{data['pass_rate']}%[/{gs}]",
+                str(data["passed"]),
+                str(data["failed"]),
+                f"{data['duration']}s",
+                status,
+            )
+
+        self.console.print(table)
+
+        # Genel ozet
+        summary = scanner.get_consolidated_summary()
+        overall_gs = "green" if summary["pass_rate"] >= 80 else "yellow" if summary["pass_rate"] >= 60 else "red"
+        from rich.panel import Panel
+        self.console.print(Panel(
+            f"[bold {overall_gs}]Genel: {summary['grade']} ({summary['pass_rate']}%)[/bold {overall_gs}]  |  "
+            f"[green]{summary['total_passed']} gecti[/green]  |  "
+            f"[red]{summary['total_failed']} kaldi[/red]  |  "
+            f"[dim]{summary['project_count']} proje  |  {summary['duration']}s[/dim]",
+            title="[bold cyan]BATCH SONUC[/bold cyan]", border_style="cyan",
+        ))
+
+        # Hata olan projeler
+        errors = [d for d in results.values() if d.get("error")]
+        if errors:
+            self.console.print(f"\n[yellow]{len(errors)} projede hata:[/yellow]")
+            for e in errors:
+                self.console.print(f"  [red]-[/red] {e['project_name']}: {e['error'][:60]}")
+        self.console.print()
+
+    def _baseline(self, arg):
+        """Baseline yonetimi: save veya check."""
+        sub = arg.strip().lower() if arg else ""
+
+        if sub == "save":
+            self._baseline_save()
+        elif sub == "check":
+            self._baseline_check()
+        else:
+            self.console.print("\n[bold]Baseline Komutlari:[/bold]")
+            self.console.print("  [cyan]baseline save[/cyan]    Mevcut taramayi baseline olarak kaydet")
+            self.console.print("  [cyan]baseline check[/cyan]   Baseline ile karsilastir (gerileme kontrolu)")
+            self.console.print()
+            if self.project_path:
+                from nazar.cache.scan_cache import ScanCache
+                cache = ScanCache(self.project_path)
+                if cache.has_baseline():
+                    bl = cache.get_baseline()
+                    if bl:
+                        self.console.print(f"  [green]Mevcut baseline:[/green] {bl.get('grade', '?')} ({bl.get('pass_rate', 0)}%)")
+                        self.console.print(f"  [dim]Tarih: {bl.get('timestamp', '?')}[/dim]")
+                else:
+                    self.console.print("  [dim]Baseline yok. 'baseline save' ile olusturun.[/dim]")
+            else:
+                self.console.print("  [dim]Once bir proje tarayin.[/dim]")
+            self.console.print()
+
+    def _baseline_save(self):
+        """Mevcut tarama sonuclarini baseline olarak kaydet."""
+        if not self.results or not self.project_path:
+            self.console.print("\n[yellow]  Once bir proje tarayin: scan <yol>[/yellow]\n")
+            return
+
+        from nazar.cache.scan_cache import ScanCache
+
+        cache = ScanCache(self.project_path)
+        cache.save_baseline(self.results)
+
+        passed = sum(1 for r in self.results if r.get("passed"))
+        total = len(self.results)
+        rate = (passed / total * 100) if total else 0
+        grade = _grade(rate)
+
+        self.console.print(Panel(
+            f"[bold green]BASELINE KAYDEDILDI[/bold green]\n"
+            f"Proje: {Path(self.project_path).name}\n"
+            f"Not: {grade} ({rate:.1f}%)\n"
+            f"Test: {passed} gecti / {total - passed} kaldi\n"
+            f"Dosya: .nazar/baseline.json",
+            expand=False, border_style="green",
+        ))
+
+    def _baseline_check(self):
+        """Mevcut taramayi baseline ile karsilastir."""
+        if not self.project_path:
+            self.console.print("\n[yellow]  Once bir proje tarayin: scan <yol>[/yellow]\n")
+            return
+
+        from nazar.cache.scan_cache import ScanCache
+
+        cache = ScanCache(self.project_path)
+
+        if not cache.has_baseline():
+            self.console.print("\n[red]  Baseline bulunamadi.[/red]")
+            self.console.print("  [dim]Once 'baseline save' ile baseline kaydedin.[/dim]\n")
+            return
+
+        if not self.results:
+            self.console.print("\n[yellow]  Once bir tarama yapin: scan <yol>[/yellow]\n")
+            return
+
+        comparison = cache.compare_with_baseline(self.results)
+
+        baseline_gs = "green" if comparison["baseline_rate"] >= 80 else "yellow" if comparison["baseline_rate"] >= 60 else "red"
+        current_gs = "green" if comparison["current_rate"] >= 80 else "yellow" if comparison["current_rate"] >= 60 else "red"
+        delta = comparison["delta"]
+        delta_sign = "+" if delta > 0 else ""
+        delta_color = "green" if delta > 0 else "red" if delta < 0 else "dim"
+
+        self.console.print(Panel(
+            f"[bold]Baseline:[/bold] [{baseline_gs}]{comparison['baseline_grade']} ({comparison['baseline_rate']}%)[/{baseline_gs}]\n"
+            f"[bold]Simdi:[/bold]    [{current_gs}]{comparison['current_grade']} ({comparison['current_rate']}%)[/{current_gs}]\n"
+            f"[bold]Fark:[/bold]     [{delta_color}]{delta_sign}{delta}%[/{delta_color}]",
+            title="[bold yellow]BASELINE KARSILASTIRMA[/bold yellow]", border_style="yellow",
+        ))
+
+        # Regressions
+        regressions = comparison.get("regressions", [])
+        if regressions:
+            self.console.print(f"\n[bold red]GERILEMELER ({len(regressions)}):[/bold red]")
+            for r in regressions[:10]:
+                pri = r.get("priority", "medium").upper()
+                self.console.print(f"  [red]-[/red] [{pri}] {r['name']}")
+                if r.get("detail"):
+                    self.console.print(f"    [dim]{r['detail'][:70]}[/dim]")
+
+        # Improvements
+        improvements = comparison.get("improvements", [])
+        if improvements:
+            self.console.print(f"\n[bold green]DUZELTMELER ({len(improvements)}):[/bold green]")
+            for r in improvements[:10]:
+                self.console.print(f"  [green]+[/green] {r['name']}")
+
+        # New issues
+        new_issues = comparison.get("new_issues", [])
+        if new_issues:
+            self.console.print(f"\n[bold yellow]YENI SORUNLAR ({len(new_issues)}):[/bold yellow]")
+            for r in new_issues[:10]:
+                pri = r.get("priority", "medium").upper()
+                self.console.print(f"  [yellow]![/yellow] [{pri}] {r['name']}")
+
+        if comparison.get("has_regressions"):
+            self.console.print(f"\n[bold red]UYARI: {len(regressions)} gerileme tespit edildi![/bold red]")
+        else:
+            self.console.print(f"\n[bold green]OK: Gerileme yok. Baseline korunuyor.[/bold green]")
+        self.console.print()
 
     def _run_ui(self):
         """Maestro ile UI testlerini cihazda calistir."""

@@ -277,6 +277,47 @@ CONFIDENCE_SCORES = {
     "uncommitted_snapshots": 90,
     "snapshot_directory_check": 70,
 
+    # Compliance - OWASP
+    "owasp_full": 80,
+    "owasp_A01_broken_access_control": 70,
+    "owasp_A02_cryptographic_failures": 80,
+    "owasp_A03_injection": 85,
+    "owasp_A04_insecure_design": 55,
+    "owasp_A05_security_misconfiguration": 75,
+    "owasp_A06_vulnerable_components": 70,
+    "owasp_A07_auth_failures": 75,
+    "owasp_A08_integrity_failures": 80,
+    "owasp_A09_logging_failures": 65,
+    "owasp_A10_ssrf": 70,
+
+    # Compliance - GDPR/KVKK
+    "gdpr_full": 75,
+    "gdpr_consent_mechanism": 65,
+    "gdpr_data_deletion": 70,
+    "gdpr_privacy_policy": 80,
+    "gdpr_cookie_consent": 60,
+    "gdpr_data_encryption_at_rest": 65,
+    "gdpr_pii_logging_prevention": 80,
+
+    # Compliance - SOC2
+    "soc2_full": 75,
+    "soc2_authentication": 70,
+    "soc2_access_control": 65,
+    "soc2_audit_logging": 60,
+    "soc2_encryption_in_transit": 85,
+    "soc2_error_handling": 70,
+    "soc2_dependency_updates": 75,
+
+    # Compliance - PCI-DSS
+    "pci_full": 80,
+    "pci_no_credit_card_in_code": 90,
+    "pci_no_pan_storage": 75,
+    "pci_tls_enforcement": 85,
+    "pci_input_validation_payment": 65,
+
+    # Compliance - Ozet
+    "compliance_summary": 75,
+
     # Play Store
     "target_sdk": 95,
     "exported_components": 90,
