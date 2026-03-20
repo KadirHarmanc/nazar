@@ -82,12 +82,12 @@ CONFIDENCE_SCORES = {
     "missing_timeout": 55,
     "hardcoded_urls": 60,
 
-    # Mobile
-    "certificate_pinning": 90,
+    # Mobile - context-dependent kontroller icin dusurulmus skorlar
+    "certificate_pinning": 65,
     "insecure_storage_mobile": 80,
-    "root_jailbreak_detection": 85,
-    "deeplink_validation": 70,
-    "screenshot_protection": 60,
+    "root_jailbreak_detection": 60,
+    "deeplink_validation": 55,
+    "screenshot_protection": 45,
 
     # Code Quality
     "long_functions": 95,

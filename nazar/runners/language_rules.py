@@ -4,12 +4,15 @@
 SKIP_RULES = {
     # Swift'te var gecerli keyword
     "var_usage": {".swift", ".kt"},
-    # Config dosyalarinda function() normal
-    "dangerous_functions": {".config.js", ".config.ts", ".config.mjs", "babel.config", "webpack.config", "vite.config", "next.config", "metro.config"},
+    # Config dosyalarinda function() normal (module.exports = function() tehlikeli degil)
+    "dangerous_functions": {".config.js", ".config.ts", ".config.mjs", ".config.cjs",
+                            "babel.config", "webpack.config", "vite.config", "next.config",
+                            "metro.config", "jest.config", "tailwind.config", "postcss.config",
+                            "eslint.config", "prettier.config", "tsconfig"},
     # Test dosyalarinda debug statement normal
     "debug_statements": {".test.", ".spec.", "__tests__"},
-    # React Native'de relative import normal
-    "path_traversal": {".tsx", ".jsx", ".ts", ".js"},  # Will use context check instead
+    # Frontend component dosyalarinda relative import (../) path traversal DEGIL
+    "path_traversal": {".tsx", ".jsx", ".vue", ".svelte"},
 }
 
 # Hangi kurallar hangi dosya uzantilarinda GECERLI

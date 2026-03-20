@@ -93,18 +93,27 @@ class AppStoreChecker(BaseRunner):
         if not used_apis:
             return True, "Izne tabi API kullanimi tespit edilmedi"
 
-        # Info.plist kontrol
+        # Info.plist kontrol - tum olasi yollar
         info_plist = ""
-        for name in ["Info.plist", "ios/Info.plist", "app.json", "app.config.js"]:
-            content = self.read(name)
-            if content:
-                info_plist += content
-                break
-
-        # app.json'daki expo config'i de kontrol et
+        # 1) ios/*/Info.plist (ornegin ios/BetterPlate/Info.plist)
+        for rel, full in self._all_files():
+            if rel.startswith("ios/") and os.path.basename(rel) == "Info.plist":
+                content = Path(full).read_text(errors="ignore")
+                if content:
+                    info_plist += content
+        # 2) Kok dizindeki Info.plist
+        root_info = self.read("Info.plist")
+        if root_info:
+            info_plist += root_info
+        # 3) app.json - Expo infoPlist config dahil
         app_json = self.read("app.json")
         if app_json:
             info_plist += app_json
+        # 4) app.config.js / app.config.ts
+        for config_name in ["app.config.js", "app.config.ts"]:
+            config_content = self.read(config_name)
+            if config_content:
+                info_plist += config_content
 
         missing = []
         for api in used_apis:
@@ -263,6 +272,17 @@ class AppStoreChecker(BaseRunner):
 
     def check_app_icon_sizes(self, t: dict) -> Tuple[bool, str]:
         """App icon dosyalari var mi."""
+        # Expo/RN projelerinde app.json icon ONCE kontrol et - Expo build sirasinda otomatik uretir
+        app_json = self.read("app.json")
+        if app_json:
+            try:
+                app_data = json.loads(app_json)
+                expo_config = app_data.get("expo", app_data)
+                if expo_config.get("icon"):
+                    return True, "app.json'da icon tanimli (Expo build sirasinda tum boyutlari uretir)"
+            except (json.JSONDecodeError, AttributeError):
+                if '"icon"' in app_json:
+                    return True, "app.json'da icon tanimli (Expo)"
         icon_found = False
         for rel, full in self._all_files():
             dirpath = os.path.dirname(full)
@@ -279,10 +299,6 @@ class AppStoreChecker(BaseRunner):
                         return True, f"{len(sizes)} ikon boyutu mevcut"
                     except Exception:
                         pass
-        # React Native / Expo projeler icin app.json kontrol
-        app_json = self.read("app.json")
-        if app_json and "icon" in app_json:
-            return True, "app.json'da icon tanimli (Expo)"
         if not icon_found:
             return False, "AppIcon.appiconset bulunamadi"
         return True, "App icon mevcut"
@@ -419,21 +435,35 @@ class AppStoreChecker(BaseRunner):
             privacy_content = Path(os.path.join(self.root, found)).read_text(errors="ignore")
         if not privacy_content:
             return True, "PrivacyInfo.xcprivacy yok (ayri kontrol)"
-        # Reason kodlarini dogrula
+        # Reason kodlarini dogrula - sadece NSPrivacyAccessedAPITypeReasons
+        # bloklari icindeki kodlari al (min 2 karakter prefix ile version string'leri atla)
         invalid = []
-        for api_cat, valid_codes in VALID_CODES.items():
-            if api_cat.lower() in privacy_content.lower():
-                found_codes = re.findall(r'[A-Z0-9]{1,4}\.\d', privacy_content)
-                for code in found_codes:
-                    all_valid = [c for codes in VALID_CODES.values() for c in codes]
-                    if code not in all_valid:
-                        invalid.append(code)
+        all_valid = [c for codes in VALID_CODES.values() for c in codes]
+        # NSPrivacyAccessedAPITypeReasons blogundan reason kodlarini cikar
+        reason_blocks = re.findall(
+            r'NSPrivacyAccessedAPITypeReasons.*?</array>',
+            privacy_content, re.DOTALL
+        )
+        reason_section = "\n".join(reason_blocks) if reason_blocks else privacy_content
+        found_codes = re.findall(r'[A-Z0-9]{2,4}\.\d+', reason_section)
+        for code in found_codes:
+            if code not in all_valid:
+                invalid.append(code)
         if invalid:
             return False, f"Gecersiz reason kodu: {', '.join(invalid[:3])} - Apple'in kabul ettigi kodlari kullanin"
         return True, "Reason kodlari gecerli"
 
     def check_sdk_privacy_manifests(self, t: dict) -> Tuple[bool, str]:
         """Third-party SDK'larin privacy manifest'i var mi."""
+        # Expo managed workflow ise bu kontrolu atla - Expo build sirasinda otomatik halleder
+        app_json_content = self.read("app.json")
+        if app_json_content:
+            try:
+                app_data = json.loads(app_json_content)
+                if "expo" in app_data:
+                    return True, "Expo managed workflow - SDK privacy manifest'leri build sirasinda otomatik eklenir"
+            except (json.JSONDecodeError, AttributeError):
+                pass
         KNOWN_SDKS_NEEDING_MANIFEST = [
             "react-native-async-storage",
             "expo-device",
@@ -513,12 +543,18 @@ class AppStoreChecker(BaseRunner):
 
     def check_bundle_secrets(self, t: dict) -> Tuple[bool, str]:
         """EXPO_PUBLIC_* ile bundle'a gomulmus secret'lar."""
+        # Anon key'ler public by design - whitelist
+        SAFE_PATTERNS = {"ANON", "PUBLIC", "PUBLISHABLE", "NEXT_PUBLIC"}
         # .env ve eas.json kontrol
         dangerous = []
         for env_file in [".env", ".env.production", ".env.local", "eas.json"]:
             content = self.read(env_file)
             if content:
                 for m in re.finditer(r"EXPO_PUBLIC_\w*(?:SECRET|KEY|TOKEN|PASS" + r"WORD|PRIVATE)\w*", content, re.IGNORECASE):
+                    var_name = m.group().upper()
+                    # Anon/public/publishable key'ler guvenli - whitelist kontrolu
+                    if any(safe in var_name for safe in SAFE_PATTERNS):
+                        continue
                     dangerous.append(m.group())
         if dangerous:
             return False, f"{len(dangerous)} hassas EXPO_PUBLIC_ degiskeni: {dangerous[0]} - bundle'a gomulur, IPA'dan okunabilir"

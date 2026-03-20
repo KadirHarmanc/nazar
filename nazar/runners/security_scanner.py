@@ -71,7 +71,23 @@ class DeepSecurityScanner(BaseRunner):
         )
         # Sadece client-side dosyalarda kontrol et
         client_hits = [h for h in hits if any(ext in h["file"] for ext in [".tsx", ".jsx", ".ts", ".js"]) and "server" not in h["file"].lower() and "api" not in h["file"].lower()]
-        return _fmt(client_hits, "client-side PII exposure")
+        # TypeScript type annotation'larini filtrele (email: string, phone: number, interface, type)
+        filtered_hits = []
+        for h in client_hits:
+            content = self.read(h["file"])
+            lines = content.split("\n")
+            if h["line"] <= len(lines):
+                line_text = lines[h["line"] - 1]
+                # TS type annotation satirlarini atla
+                if re.search(r':\s*(?:string|number|boolean|any|unknown|null|undefined)\b', line_text):
+                    continue
+                if re.search(r'\b(?:interface|type|enum)\s+\w+', line_text):
+                    continue
+                # Optional property (email?: string) atla
+                if re.search(r'\w+\?\s*:', line_text):
+                    continue
+            filtered_hits.append(h)
+        return _fmt(filtered_hits, "client-side PII exposure")
 
     def check_source_maps_in_prod(self, t: dict) -> Tuple[bool, str]:
         """Production'da source map dosyalari - kaynak kod ifsa olur."""
@@ -316,8 +332,9 @@ class DeepSecurityScanner(BaseRunner):
 
     def check_weak_encryption(self, t: dict) -> Tuple[bool, str]:
         """Zayif sifreleme algoritmasi tespiti."""
-        p1 = r"""(?:""" + "DE" + r"""S|""" + "RC" + r"""4|""" + "RC" + r"""2|Blowfish)[\s\(\.]"""
-        p2 = r"""(?:""" + "EC" + r"""B|AES-""" + "EC" + r"""B|mode\s*[:=]\s*['"]""" + "EC" + r"""B)"""
+        # \b word boundary ile DES/RC4/RC2'nin DESCRIBE gibi kelimelerde false positive vermesini onle
+        p1 = r"""(?:\b""" + "DE" + r"""S\b|\b""" + "RC" + r"""4\b|\b""" + "RC" + r"""2\b|\bBlowfish\b)[\s\(\.]"""
+        p2 = r"""(?:\b""" + "EC" + r"""B\b|AES-""" + "EC" + r"""B|mode\s*[:=]\s*['"]""" + "EC" + r"""B)"""
         p3 = r"""(?:key[_-]?size|keySize)\s*[:=]\s*(?:56|64|512)\b"""
         all_hits = []
         for p in [p1, p2, p3]:

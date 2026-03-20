@@ -697,7 +697,7 @@ class TestOrchestrator(BaseRunner):
         # Yeni guvenlik kontrolleri
         new_checks = {
             "command_injection": r"""\b(?:os\.system|subprocess\.call|child_process\.exec)\s*\(""",
-            "path_traversal": r"""(?:\.\./\.\.|os\.path\.join\s*\(.*(?:request|input|param))""",
+            "path_traversal": r"""(?:os\.path\.join\s*\(.*(?:request|input|param))""",
             "insecure_deserialization": r"""(?:yaml\.load\s*\(\s*(?!.*Loader)|marshal\.loads\s*\(|unserialize\s*\()""",
             "weak_crypto": r"""(?:\bMD5\b|\bmd5\b|\bSHA1\b|\bsha1\b|\bDES\b|\bRC4\b)\s*\(""",
             "cors_wildcard": r"""(?:Access-Control""" + r"""-Allow-Origin.*\*|CORS""" + r"""_ALLOW_ALL|cors\(\s*\))""",
@@ -706,11 +706,26 @@ class TestOrchestrator(BaseRunner):
             "missing_auth": r"""@app\.(?:route|get|post|put|delete)\s*\([^)]+\)\s*\n(?:(?!@login_required|@auth|@requires_auth).)*def""",
         }
 
+        # Config dosyalarini dangerous_functions'dan atla
+        _CONFIG_SUFFIXES = (".config.js", ".config.ts", ".config.mjs", ".config.cjs",
+                            "babel.config.js", "webpack.config.js", "vite.config.ts",
+                            "next.config.js", "metro.config.js", "jest.config.js",
+                            "tailwind.config.js", "postcss.config.js", "eslint.config.js",
+                            "prettier.config.js")
+        # Frontend dosyalarini path_traversal'dan atla (relative import ../component normal)
+        _FRONTEND_EXTS = (".tsx", ".jsx", ".vue", ".svelte")
+
         if sub in legacy_checks:
             hits = self.scan_pattern(legacy_checks[sub])
+            # BUG 5: Config dosyalarinda dangerous_functions false positive
+            if sub == "dangerous_functions":
+                hits = [h for h in hits if not any(h["file"].endswith(s) for s in _CONFIG_SUFFIXES)]
             return not hits, f"{len(hits)} bulundu: {hits[0]['file']}:{hits[0]['line']}" if hits else "Temiz"
         elif sub in new_checks:
             hits = self.scan_pattern(new_checks[sub])
+            # BUG 6: Frontend dosyalarinda path_traversal false positive (relative import)
+            if sub == "path_traversal":
+                hits = [h for h in hits if not any(h["file"].endswith(ext) for ext in _FRONTEND_EXTS)]
             return not hits, f"{len(hits)} bulundu: {hits[0]['file']}:{hits[0]['line']}" if hits else "Temiz"
         elif sub == "cloud_keys":
             cloud_patterns = {k: v for k, v in SECRET_PATTERNS.items()
