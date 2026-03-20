@@ -20,12 +20,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich import box
 
 
-BANNER = "[bold cyan]" + r"""
-  _  _   _   ____  _   ___
- | \| | /_\ |_  / /_\ | _ \
- | .` |/ _ \ / / / _ \|   /
- |_|\_/_/ \_/___/_/ \_\_|_\
-""" + "[/bold cyan]  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]\n"
+BANNER = """[bold cyan]
+  ███╗   ██╗ █████╗ ███████╗ █████╗ ██████╗
+  ████╗  ██║██╔══██╗╚══███╔╝██╔══██╗██╔══██╗
+  ██╔██╗ ██║███████║  ███╔╝ ███████║██████╔╝
+  ██║╚██╗██║██╔══██║ ███╔╝  ██╔══██║██╔══██╗
+  ██║ ╚████║██║  ██║███████╗██║  ██║██║  ██║
+  ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+[/bold cyan]  [dim]Otonom Guvenlik & Kalite Tarayici[/dim]
+"""
 
 HELP_TEXT = """
 [bold]BASLANGIC:[/bold]
