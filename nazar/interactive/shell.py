@@ -51,7 +51,7 @@ HELP_TEXT = """
   [cyan]ignore <rule>[/cyan]                 Kurali .nazarignore'a ekle
   [cyan]baseline save[/cyan]                Mevcut taramayi baseline olarak kaydet
   [cyan]baseline check[/cyan]               Baseline ile karsilastir (gerileme kontrolu)
-  [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Maestro ile UI test calistir
+  [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Canli UI test calistir (Nazar Live Test)
   [cyan]live[/cyan]          [dim]|[/dim] [cyan]serve[/cyan]       Canli web raporu (localhost:5555)
   [cyan]update[/cyan]        [dim]|[/dim] [cyan]guncelle[/cyan]    Son versiyona guncelle
   [cyan]clear[/cyan]         [dim]|[/dim] [cyan]temizle[/cyan]     Ekrani temizle
@@ -1348,60 +1348,32 @@ class NazarShell:
         self.console.print()
 
     def _run_live_test(self, project_path):
-        """Maestro Studio ile gorsel runtime test arayuzu ac."""
-        import subprocess as _sp
-        import shutil
+        """Nazar Live Test UI ile gorsel runtime test arayuzu ac.
+
+        Maestro bagimliligini ortadan kaldirip Nazar'in kendi canli test
+        arayuzunu kullanir. Simulator/emulator ekranini canli olarak sol
+        panelde gosterirken, sag panelde YAML test adimlarini durum
+        gostergeleriyle izleme imkani sunar.
+        """
         import webbrowser
+        from nazar.live.test_ui import NazarLiveTestUI, detect_platform, get_device_name
 
         self.console.print()
-        self.console.print(Panel("[bold cyan]CANLI RUNTIME TEST[/bold cyan]", border_style="cyan"))
+        self.console.print(Panel("[bold cyan]NAZAR CANLI TEST[/bold cyan]", border_style="cyan"))
 
-        # 1. Maestro kontrolu - PATH + ~/.maestro/bin kontrol
-        maestro_bin = shutil.which("maestro") or os.path.expanduser("~/.maestro/bin/maestro")
-        if not os.path.isfile(maestro_bin):
-            self.console.print("  [yellow]Maestro kurulu degil. Kuruluyor...[/yellow]")
-            try:
-                _sp.run(["bash", "-c", 'curl -Ls "https://get.maestro.mobile.dev" | bash'], timeout=120)
-                maestro_bin = os.path.expanduser("~/.maestro/bin/maestro")
-                if not os.path.isfile(maestro_bin):
-                    self.console.print("  [red]Maestro kurulamadi.[/red]")
-                    self.console.print("  [dim]Manuel: curl -Ls \"https://get.maestro.mobile.dev\" | bash[/dim]")
-                    return
-                self.console.print("  [green]Maestro kuruldu[/green]")
-            except Exception:
-                self.console.print("  [red]Kurulum basarisiz[/red]")
-                return
-
-        # 2. Cihaz kontrolu
-        device_name = None
-        try:
-            r = _sp.run(["xcrun", "simctl", "list", "devices", "booted"], capture_output=True, text=True, timeout=10)
-            for line in r.stdout.splitlines():
-                if "Booted" in line:
-                    m = re.search(r'^\s+(.+?)\s+\(', line)
-                    if m:
-                        device_name = m.group(1)
-                    break
-        except Exception:
-            pass
-        if not device_name:
-            try:
-                r = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
-                lines = [l for l in r.stdout.strip().split("\n")[1:] if l.strip() and "device" in l]
-                if lines:
-                    device_name = lines[0].split()[0]
-            except Exception:
-                pass
-
-        if not device_name:
+        # 1. Cihaz kontrolu
+        platform = detect_platform()
+        if platform == "none":
             self.console.print("  [red]Simulator/emulator bulunamadi![/red]")
             self.console.print("  [dim]iOS: Xcode > Open Developer Tool > Simulator[/dim]")
             self.console.print("  [dim]Android: emulator -avd <isim>[/dim]")
             return
 
+        device_name = get_device_name(platform)
+        self.console.print(f"  [green]Platform:[/green] {platform.upper()}")
         self.console.print(f"  [green]Cihaz:[/green] {device_name}")
 
-        # 3. YAML test dosyalarini uret (yoksa)
+        # 2. YAML test dosyalarini uret (yoksa)
         ui_dir = Path(project_path) / ".nazar" / "ui-tests"
         yaml_files = []
         if ui_dir.exists():
@@ -1418,57 +1390,46 @@ class NazarShell:
             except Exception:
                 pass
 
-        # 4. Maestro Studio ac - tarayicide gorsel arayuz (non-blocking)
+        if not yaml_files:
+            self.console.print("  [yellow]UI test dosyasi bulunamadi[/yellow]")
+            self.console.print("  [dim]Simulator izleme modunda baslatiliyor...[/dim]")
+
+        # 3. Nazar Live Test UI baslat
         self.console.print()
-        self.console.print("  [bold cyan]Maestro Studio baslatiliyor...[/bold cyan]")
+        self.console.print("  [bold cyan]Nazar Live Test baslatiliyor...[/bold cyan]")
+
+        self._live_test_ui = NazarLiveTestUI(port=9999)
 
         try:
-            # Arka planda maestro studio baslat (--no-window: biz kendimiz acacagiz)
-            self._maestro_process = _sp.Popen(
-                [maestro_bin, "studio", "--no-window"],
-                cwd=str(project_path),
-                stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
-            )
+            if yaml_files:
+                # Ilk YAML dosyasini calistir
+                yaml_file = yaml_files[0]
+                self.console.print(f"  [dim]Test dosyasi: {yaml_file.name}[/dim]")
+                started = self._live_test_ui.start(str(yaml_file), auto_run=True)
+            else:
+                # Sadece simulator izleme modu
+                started = self._live_test_ui.start_server_only()
 
-            # Maestro hazir olana kadar bekle (max 45sn)
-            import urllib.request
-            self.console.print("  [dim]Maestro baslatiliyor (ilk seferinde 20-30sn surebilir)...[/dim]")
-            ready = False
-            for tick in range(45):
-                if self._maestro_process.poll() is not None:
-                    self.console.print("  [red]Maestro Studio baslatılamadi[/red]")
-                    return
-                try:
-                    urllib.request.urlopen("http://localhost:9999", timeout=1)
-                    ready = True
-                    break
-                except Exception:
-                    pass
-                time.sleep(1)
-                if tick % 5 == 4:
-                    self.console.print(f"  [dim]Bekleniyor... ({tick+1}s)[/dim]")
-
-            if not ready:
-                self.console.print("  [red]Maestro Studio 45sn icinde baslatılamadi[/red]")
-                if self._maestro_process.poll() is None:
-                    self._maestro_process.kill()
+            if not started:
+                self.console.print("  [red]Live Test UI baslatilamadi[/red]")
                 return
 
             # Tarayiciyi ac
             webbrowser.open("http://localhost:9999")
 
-            self.console.print("  [green]Maestro Studio acildi:[/green] http://localhost:9999")
-            self.console.print("  [dim]Tarayicida simulator ekrani ve test paneli gorunecek[/dim]")
+            self.console.print(f"  [green]Nazar Live Test acildi:[/green] http://localhost:9999")
+            self.console.print("  [dim]Sol panel: Canli simulator ekrani (1sn arayla yenilenir)[/dim]")
+            self.console.print("  [dim]Sag panel: Test adimlari ve durum gostergeleri[/dim]")
             self.console.print()
 
-            # Kullaniciya kontrol ver
+            # YAML dosyalari bilgisi
             if yaml_files:
                 self.console.print(f"  [bold]YAML test dosyalari ({len(yaml_files)}):[/bold]")
                 for yf in yaml_files:
-                    self.console.print(f"    [cyan]{yf.name}[/cyan]")
+                    marker = "[cyan]>[/cyan] " if yf == yaml_files[0] else "  "
+                    self.console.print(f"    {marker}[cyan]{yf.name}[/cyan]")
                 self.console.print()
-                self.console.print("  [dim]Maestro Studio'da bu dosyalari yukleyip test edebilirsiniz[/dim]")
-                self.console.print("  [dim]Dosya yolu: {}/[/dim]".format(str(ui_dir)))
+                self.console.print(f"  [dim]Dosya yolu: {ui_dir}/[/dim]")
 
             self.console.print()
             try:
@@ -1476,20 +1437,25 @@ class NazarShell:
             except (KeyboardInterrupt, EOFError):
                 pass
 
-            # Maestro'yu kapat
-            if self._maestro_process.poll() is None:
-                self._maestro_process.terminate()
-                try:
-                    self._maestro_process.wait(timeout=5)
-                except _sp.TimeoutExpired:
-                    self._maestro_process.kill()
+            # Sonuclari goster
+            if self._live_test_ui.tracker:
+                data = self._live_test_ui.tracker.get_data()
+                if data.get("total", 0) > 0:
+                    self.console.print()
+                    self.console.print(f"  [bold]Test Sonuclari:[/bold]")
+                    self.console.print(f"    [green]{data['passed']} gecti[/green]  "
+                                       f"[red]{data['failed']} kaldi[/red]  "
+                                       f"[yellow]{data.get('manual', 0)} manuel[/yellow]  "
+                                       f"[dim]{data['elapsed']}s[/dim]")
 
-            self.console.print("  [dim]Maestro Studio kapatildi[/dim]")
+            # Kapat
+            self._live_test_ui.stop()
+            self.console.print("  [dim]Nazar Live Test kapatildi[/dim]")
 
-        except FileNotFoundError:
-            self.console.print(f"  [red]Maestro bulunamadi: {maestro_bin}[/red]")
         except Exception as e:
             self.console.print(f"  [red]Hata: {e}[/red]")
+            if hasattr(self, '_live_test_ui') and self._live_test_ui:
+                self._live_test_ui.stop()
 
     def _rule(self, arg):
         """Kural yonetim menusu."""
@@ -1883,38 +1849,32 @@ class NazarShell:
         self.console.print()
 
     def _run_ui(self):
-        """Maestro ile UI testlerini cihazda calistir."""
+        """Nazar Live Test UI ile UI testlerini cihazda calistir."""
         import subprocess as _sp
+        from nazar.live.test_ui import detect_platform, get_device_name
 
-        # 1. Maestro kurulu mu?
-        maestro_ok = False
-        try:
-            r = _sp.run(["maestro", "--version"], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                maestro_ok = True
-                self.console.print(f"\n  [green]Maestro:[/green] {r.stdout.strip()}")
-        except FileNotFoundError:
+        # 1. Platform kontrolu
+        platform = detect_platform()
+        if platform != "none":
+            device_name = get_device_name(platform)
+            self.console.print(f"\n  [green]{platform.upper()}:[/green] {device_name}")
+        else:
+            # Geriye donuk uyumluluk
             pass
 
-        if not maestro_ok:
-            self.console.print("\n[red]  Maestro kurulu degil. Kurmak icin:[/red]")
-            self.console.print("    [cyan]brew install maestro[/cyan]  [dim](macOS)[/dim]")
-            self.console.print('    [cyan]curl -Ls "https://get.maestro.mobile.dev" | bash[/cyan]  [dim](Linux/macOS)[/dim]')
-            self.console.print()
-            return
-
-        # 2. Bagli cihaz/emulator var mi?
-        device_found = False
-        device_name = ""
-        try:
-            r = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
-            lines = [l for l in r.stdout.strip().split("\n")[1:] if l.strip() and "device" in l]
-            if lines:
-                device_found = True
-                device_name = lines[0].split()[0]
-                self.console.print(f"  [green]Cihaz:[/green] {device_name}")
-        except FileNotFoundError:
-            pass
+        # 2. Cihaz kontrolu (Nazar kendi dedektoru ile)
+        device_found = platform != "none"
+        if not device_found:
+            # Fallback: dogrudan subprocess ile kontrol
+            try:
+                r = _sp.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+                lines = [l for l in r.stdout.strip().split("\n")[1:] if l.strip() and "device" in l]
+                if lines:
+                    device_found = True
+                    device_name = lines[0].split()[0]
+                    self.console.print(f"  [green]Cihaz:[/green] {device_name}")
+            except FileNotFoundError:
+                pass
 
         if not device_found:
             try:
@@ -1983,7 +1943,10 @@ class NazarShell:
             self.console.print("  [dim]Iptal edildi.[/dim]\n")
             return
 
-        # 5. Secilen testleri Maestro ile calistir
+        # 5. Secilen testleri Nazar Live Test UI ile calistir
+        import webbrowser
+        from nazar.live.test_ui import NazarLiveTestUI
+
         total = len(selected_files)
         results = []
 
@@ -1991,29 +1954,51 @@ class NazarShell:
             fname = yf.name
             self.console.print(f"\n  [bold cyan][{i}/{total}][/bold cyan] {fname}")
 
-            cmd = ["maestro", "test", str(yf)]
-            if device_name:
-                cmd.extend(["--device", device_name])
-
+            ui = NazarLiveTestUI(port=9999)
             step_start = time.time()
+
             try:
-                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True)
-                for line in proc.stdout:
-                    line = line.rstrip()
-                    if line.strip():
-                        self.console.print(f"    [dim]{line.strip()[:80]}[/dim]")
-                proc.wait()
-                success = proc.returncode == 0
+                started = ui.start(str(yf), auto_run=True)
+                if not started:
+                    self.console.print(f"    [red]Baslatilamadi[/red]")
+                    results.append({"file": fname, "passed": False, "duration": 0.0})
+                    continue
+
+                # Ilk test icin tarayiciyi ac
+                if i == 1:
+                    webbrowser.open("http://localhost:9999")
+                    self.console.print(f"  [green]Nazar Live Test:[/green] http://localhost:9999")
+
+                # Testlerin bitmesini bekle (max 120sn)
+                for tick in range(240):
+                    if ui.tracker:
+                        data = ui.tracker.get_data()
+                        if data.get("overall_status") == "done":
+                            break
+                    time.sleep(0.5)
+
                 duration = time.time() - step_start
+
+                # Sonuclari topla
+                if ui.tracker:
+                    data = ui.tracker.get_data()
+                    failed_count = data.get("failed", 0)
+                    success = failed_count == 0
+                    self.console.print(f"    [green]{data.get('passed', 0)} gecti[/green]  "
+                                       f"[red]{failed_count} kaldi[/red]  "
+                                       f"[dim]({duration:.1f}s)[/dim]")
+                else:
+                    success = False
+
                 status = "[green]GECTI[/green]" if success else "[red]BASARISIZ[/red]"
                 self.console.print(f"    {status} [dim]({duration:.1f}s)[/dim]")
                 results.append({"file": fname, "passed": success, "duration": duration})
-            except _sp.TimeoutExpired:
-                self.console.print(f"    [red]ZAMAN ASIMI[/red]")
-                results.append({"file": fname, "passed": False, "duration": 300.0})
+
             except Exception as exc:
                 self.console.print(f"    [red]HATA: {exc}[/red]")
                 results.append({"file": fname, "passed": False, "duration": 0.0})
+            finally:
+                ui.stop()
 
         # 6. Sonuc ozeti
         passed = sum(1 for r in results if r["passed"])
