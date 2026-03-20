@@ -1183,6 +1183,141 @@ def batch(
             console.print(f"  [red]-[/red] {e['project_name']}: {e['error'][:60]}")
 
 
+# === Coverage Komutu ===
+
+
+@app.command()
+def coverage(
+    ctx: typer.Context,
+    path: Path = typer.Argument(".", help="Proje dizini"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="JSON cikti dosyasi"),
+    profile: str = typer.Option("full", "--profile", "-p", help="Test profili"),
+):
+    """Projeyi tara ve test kapsami raporu olustur.
+
+    Kategori bazli kapsam, dosya bazli sorun yogunlugu,
+    guven dagilimi ve onceki taramayla trend verisi gosterir.
+
+    Kullanim:
+      nazar coverage                         # mevcut dizin
+      nazar coverage ~/MyProject             # belirli proje
+      nazar coverage . -o coverage.json      # JSON dosyaya kaydet
+    """
+    from nazar.reporters.coverage_reporter import CoverageReporter
+    from nazar.cache.scan_cache import ScanCache
+
+    opts = ctx.obj or {}
+    json_output = opts.get("json_output", False)
+    quiet = opts.get("quiet", False)
+    show_ui = not quiet and not json_output
+
+    if show_ui:
+        console.print(Panel("[bold cyan]NAZAR COVERAGE[/bold cyan] - Test Kapsami Raporu", expand=False))
+
+    # Tarama yap
+    start = time.time()
+    scan_result = _phase_scan(path, show_ui)
+    _test_plan, plan_dict = _phase_plan(scan_result, show_ui, profile=profile)
+    plan_dict["project_path"] = str(Path(path).resolve())
+    orchestrator = TestOrchestrator(str(path), plan_dict)
+    results = _phase_execute(orchestrator, plan_dict, json_output, quiet, show_ui)
+
+    # Coverage raporu olustur
+    reporter = CoverageReporter()
+    cov_json = reporter.generate(results, plan_dict, output)
+    cov_data = json.loads(cov_json)
+
+    if json_output:
+        sys.stdout.write(cov_json + "\n")
+        return
+
+    # Ozet
+    summary = cov_data["summary"]
+    gs = "green" if summary["pass_rate"] >= 80 else "yellow" if summary["pass_rate"] >= 60 else "red"
+    console.print(Panel(
+        f"[bold {gs}]Not: {summary['grade']} ({summary['pass_rate']}%)[/bold {gs}]  |  "
+        f"[green]{summary['passed']} passed[/green]  |  "
+        f"[red]{summary['failed']} failed[/red]  |  "
+        f"[dim]{summary['total_checks']} kontrol[/dim]",
+        title="[bold cyan]KAPSAM OZETI[/bold cyan]", border_style="cyan",
+    ))
+
+    # Kategori tablosu
+    cat_data = cov_data.get("category_coverage", {})
+    if cat_data:
+        cat_table = Table(title="Kategori Kapsami", show_header=True)
+        cat_table.add_column("Kategori", style="cyan", width=20)
+        cat_table.add_column("Toplam", justify="center", width=8)
+        cat_table.add_column("Gecen", justify="center", width=8, style="green")
+        cat_table.add_column("Kalan", justify="center", width=8, style="red")
+        cat_table.add_column("Oran", justify="right", width=8)
+        cat_table.add_column("Durum", width=16)
+        for cat, info in cat_data.items():
+            rate = info["pass_rate"]
+            rs = "green" if rate >= 80 else "yellow" if rate >= 60 else "red"
+            status_map = {"clean": "[green]Temiz[/green]", "partial": "[yellow]Kismi[/yellow]", "needs_attention": "[red]Dikkat[/red]"}
+            cat_table.add_row(
+                cat.upper(), str(info["total"]), str(info["passed"]), str(info["failed"]),
+                f"[{rs}]{rate}%[/{rs}]", status_map.get(info["status"], info["status"]),
+            )
+        console.print(cat_table)
+
+    # Guven dagilimi
+    conf = cov_data.get("confidence_distribution", {})
+    if conf.get("total_findings", 0) > 0:
+        conf_table = Table(title="Guven Dagilimi (Basarisiz Testler)", show_header=True)
+        conf_table.add_column("Seviye", style="cyan", width=20)
+        conf_table.add_column("Sayi", justify="center", width=10)
+        conf_table.add_column("Aciklama", width=30)
+        for level in ("high", "medium", "low"):
+            data = conf.get(level, {})
+            conf_table.add_row(
+                level.upper(), str(data.get("count", 0)), data.get("label", ""),
+            )
+        conf_table.add_row("", "", "")
+        conf_table.add_row("[bold]Ortalama Guven[/bold]", f"[bold]{conf.get('average_confidence', 0)}%[/bold]", "")
+        console.print(conf_table)
+
+    # Dosya yogunlugu (en sorunlu 10 dosya)
+    file_density = cov_data.get("file_issue_density", [])
+    if file_density:
+        file_table = Table(title="En Sorunlu Dosyalar", show_header=True)
+        file_table.add_column("#", style="dim", width=4)
+        file_table.add_column("Dosya", ratio=3)
+        file_table.add_column("Sorun", justify="center", width=8)
+        file_table.add_column("En Yuksek", width=10)
+        for i, fd in enumerate(file_density[:10], 1):
+            sev = fd["highest_severity"]
+            ss = {"critical": "bold red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(sev, "dim")
+            file_table.add_row(str(i), fd["file"], str(fd["issue_count"]), f"[{ss}]{sev.upper()}[/{ss}]")
+        console.print(file_table)
+
+    # Trend
+    trend = cov_data.get("trend")
+    if trend and trend.get("available"):
+        delta = trend["delta_rate"]
+        delta_sign = "+" if delta > 0 else ""
+        delta_color = "green" if delta > 0 else "red" if delta < 0 else "dim"
+        direction_map = {"improving": "Yukseliyor", "regressing": "Dusuyor", "stable": "Sabit"}
+        console.print(Panel(
+            f"[bold]Onceki:[/bold] {trend['previous']['grade']} ({trend['previous']['pass_rate']}%)  "
+            f"[bold]Simdi:[/bold] {trend['current']['grade']} ({trend['current']['pass_rate']}%)  "
+            f"[{delta_color}]{delta_sign}{delta}%[/{delta_color}]  "
+            f"| {direction_map.get(trend['direction'], trend['direction'])}\n"
+            f"[green]{trend['fixed_count']} duzeltildi[/green]  |  "
+            f"[red]{trend['new_issues_count']} yeni sorun[/red]",
+            title="[bold yellow]TREND[/bold yellow]", border_style="yellow",
+        ))
+
+    duration = time.time() - start
+    console.print(f"\n[dim]Sure: {duration:.1f}s[/dim]")
+
+    if output:
+        console.print(f"[green]Rapor kaydedildi: {output}[/green]")
+
+    _show_tip()
+
+
 # === Baseline Komutlari ===
 
 baseline_app = typer.Typer(

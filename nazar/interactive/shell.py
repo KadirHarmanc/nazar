@@ -47,6 +47,7 @@ HELP_TEXT = """
   [cyan]profiles[/cyan]      [dim]|[/dim] [cyan]profiller[/cyan]   Test profilleri
   [cyan]rule[/cyan]          [dim]|[/dim] [cyan]kural[/cyan]       Kural yonetimi (olustur, dogrula, test, listele)
   [cyan]batch <y1> <y2>[/cyan]               Birden fazla projeyi tara
+  [cyan]coverage[/cyan]      [dim]|[/dim] [cyan]kapsam[/cyan]      Test kapsami raporu (kategori, dosya, guven)
   [cyan]baseline save[/cyan]                Mevcut taramayi baseline olarak kaydet
   [cyan]baseline check[/cyan]               Baseline ile karsilastir (gerileme kontrolu)
   [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Maestro ile UI test calistir
@@ -64,8 +65,8 @@ HELP_TEXT = """
 
 
 class NazarCompleter(Completer):
-    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "clear", "update", "live", "serve", "run", "rule", "batch", "baseline", "help", "quit",
-                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "temizle", "guncelle", "calistir", "kural", "toplu", "referans", "yardim", "cikis", "cat"]
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "coverage", "clear", "update", "live", "serve", "run", "rule", "batch", "baseline", "help", "quit",
+                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "kapsam", "temizle", "guncelle", "calistir", "kural", "toplu", "referans", "yardim", "cikis", "cat"]
     FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
     FORMATS = ["html", "json", "sarif", "junit", "markdown"]
 
@@ -175,6 +176,7 @@ class NazarShell:
             "categories": self._categories, "kategoriler": self._categories, "c": self._categories, "cat": self._categories,
             "profiles": self._profiles, "profiller": self._profiles,
             "stats": self._stats, "istatistik": self._stats,
+            "coverage": self._coverage, "kapsam": self._coverage,
             "rule": lambda: self._rule(arg), "kural": lambda: self._rule(arg),
             "batch": lambda: self._batch(arg), "toplu": lambda: self._batch(arg),
             "baseline": lambda: self._baseline(arg), "referans": lambda: self._baseline(arg),
@@ -1078,6 +1080,105 @@ class NazarShell:
             table.add_row("[bold]Son Tarama[/bold]", f"[bold]{self.project_path}[/bold]")
             table.add_row("Gecen/Kalan", f"[green]{p}[/green] / [red]{f}[/red]")
         self.console.print(table)
+
+    def _coverage(self):
+        """Test kapsami raporu goster."""
+        if not self.results:
+            self.console.print("[yellow]Once tarama yapin: /scan <yol>[/yellow]")
+            return
+
+        from nazar.reporters.coverage_reporter import CoverageReporter
+        import json as _json
+
+        plan = self.plan_data or {}
+        if self.project_path:
+            plan["project_path"] = self.project_path
+
+        reporter = CoverageReporter()
+        cov_json = reporter.generate(self.results, plan)
+        cov = _json.loads(cov_json)
+
+        # Ozet
+        summary = cov["summary"]
+        rate = summary["pass_rate"]
+        gs = "green" if rate >= 80 else "yellow" if rate >= 60 else "red"
+        self.console.print(Panel(
+            f"[bold {gs}]Not: {summary['grade']} ({rate}%)[/bold {gs}]  |  "
+            f"[green]{summary['passed']} passed[/green]  |  "
+            f"[red]{summary['failed']} failed[/red]  |  "
+            f"[dim]{summary['total_checks']} kontrol[/dim]",
+            title="[bold cyan]TEST KAPSAMI[/bold cyan]", border_style="cyan",
+        ))
+
+        # Kategori kapsami
+        cat_data = cov.get("category_coverage", {})
+        if cat_data:
+            cat_table = Table(title="Kategori Kapsami", box=box.ROUNDED)
+            cat_table.add_column("Kategori", style="cyan", width=18)
+            cat_table.add_column("Gecen/Toplam", justify="center", width=12)
+            cat_table.add_column("Oran", justify="right", width=8)
+            cat_table.add_column("Durum", width=14)
+            for cat, info in cat_data.items():
+                cr = info["pass_rate"]
+                rs = "green" if cr >= 80 else "yellow" if cr >= 60 else "red"
+                status_map = {
+                    "clean": "[green]Temiz[/green]",
+                    "partial": "[yellow]Kismi[/yellow]",
+                    "needs_attention": "[red]Dikkat[/red]",
+                }
+                bar_w = 10
+                filled = int(bar_w * info["passed"] / max(info["total"], 1))
+                bar = "[green]" + "=" * filled + "[/green][dim]" + "-" * (bar_w - filled) + "[/dim]"
+                cat_table.add_row(
+                    cat.upper(),
+                    f"{info['passed']}/{info['total']} {bar}",
+                    f"[{rs}]{cr}%[/{rs}]",
+                    status_map.get(info["status"], info["status"]),
+                )
+            self.console.print(cat_table)
+
+        # Guven dagilimi
+        conf = cov.get("confidence_distribution", {})
+        if conf.get("total_findings", 0) > 0:
+            self.console.print()
+            self.console.print("[bold]Guven Dagilimi (Basarisiz Testler):[/bold]")
+            for level, color in [("high", "red"), ("medium", "yellow"), ("low", "dim")]:
+                data = conf.get(level, {})
+                cnt = data.get("count", 0)
+                label = data.get("label", "")
+                if cnt > 0:
+                    self.console.print(f"  [{color}]{level.upper():<8}[/{color}] {cnt:>3}  [dim]{label}[/dim]")
+            self.console.print(f"  [dim]Ortalama guven: {conf.get('average_confidence', 0)}%[/dim]")
+
+        # En sorunlu dosyalar (ilk 5)
+        file_density = cov.get("file_issue_density", [])
+        if file_density:
+            self.console.print()
+            self.console.print("[bold]En Sorunlu Dosyalar:[/bold]")
+            for i, fd in enumerate(file_density[:5], 1):
+                sev = fd["highest_severity"]
+                ss = {"critical": "bold red", "high": "yellow", "medium": "cyan", "low": "dim"}.get(sev, "dim")
+                self.console.print(f"  [dim]#{i}[/dim] [{ss}]{sev.upper():<8}[/{ss}] {fd['file']}  [dim]({fd['issue_count']} sorun)[/dim]")
+
+        # Trend
+        trend = cov.get("trend")
+        if trend and trend.get("available"):
+            delta = trend["delta_rate"]
+            delta_sign = "+" if delta > 0 else ""
+            delta_color = "green" if delta > 0 else "red" if delta < 0 else "dim"
+            self.console.print()
+            self.console.print(Panel(
+                f"[bold]Onceki:[/bold] {trend['previous']['grade']} ({trend['previous']['pass_rate']}%)  "
+                f"[bold]Simdi:[/bold] {trend['current']['grade']} ({trend['current']['pass_rate']}%)  "
+                f"[{delta_color}]{delta_sign}{delta}%[/{delta_color}]\n"
+                f"[green]{trend['fixed_count']} duzeltildi[/green]  |  "
+                f"[red]{trend['new_issues_count']} yeni sorun[/red]",
+                title="[bold yellow]TREND[/bold yellow]", border_style="yellow",
+            ))
+
+        self.console.print()
+        self.console.print("[dim]JSON icin: export json | coverage raporunu dosyaya: nazar coverage . -o coverage.json[/dim]")
+        self.console.print()
 
     def _run_live_test(self, project_path):
         """Maestro Studio ile gorsel runtime test arayuzu ac."""

@@ -1,15 +1,22 @@
 {
   "name": "nazar-vscode",
   "displayName": "Nazar - Otonom Test Araci",
-  "description": "Kod yazarken anlik guvenlik ve kalite taramasi",
+  "description": "Kod yazarken anlik guvenlik ve kalite taramasi. Nazar ile projenizi tarayin, guvenlik aciklari ve kod kalitesi sorunlarini aninda gorun.",
   "version": "3.0.0",
-  "publisher": "nazar",
+  "publisher": "nazar-dev",
+  "icon": "images/nazar-icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nazar-dev/nazar"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Linters",
     "Testing",
+    "Programming Languages",
     "Other"
   ],
   "keywords": [
@@ -17,11 +24,16 @@
     "linter",
     "testing",
     "code-quality",
-    "nazar"
+    "nazar",
+    "static-analysis",
+    "vulnerability",
+    "code-review"
   ],
   "activationEvents": [
     "onLanguage:javascript",
     "onLanguage:typescript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact",
     "onLanguage:python",
     "onLanguage:go",
     "onLanguage:rust",
@@ -34,49 +46,92 @@
   "contributes": {
     "commands": [
       {
+        "command": "nazar.scan",
+        "title": "Nazar: Projeyi Tara",
+        "icon": "$(shield)"
+      },
+      {
         "command": "nazar.scanFile",
-        "title": "Nazar: Dosyayi Tara"
+        "title": "Nazar: Aktif Dosyayi Tara",
+        "icon": "$(file-code)"
       },
       {
-        "command": "nazar.scanProject",
-        "title": "Nazar: Projeyi Tara"
+        "command": "nazar.showReport",
+        "title": "Nazar: Tarama Raporunu Goster",
+        "icon": "$(graph)"
       },
       {
-        "command": "nazar.showGuide",
-        "title": "Nazar: Duzeltme Rehberi Goster"
+        "command": "nazar.openStudio",
+        "title": "Nazar: Studio Ac (Tarayici)",
+        "icon": "$(globe)"
       }
     ],
     "configuration": {
       "title": "Nazar",
       "properties": {
-        "nazar.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Nazar otomatik taramayi aktif et"
+        "nazar.profile": {
+          "type": "string",
+          "default": "default",
+          "enum": ["default", "strict", "security", "quick"],
+          "enumDescriptions": [
+            "Standart profil - tum testler",
+            "Siki profil - tum testler + ekstra kurallar",
+            "Guvenlik odakli - sadece guvenlik testleri",
+            "Hizli tarama - sadece kritik testler"
+          ],
+          "description": "Nazar tarama profili"
         },
-        "nazar.scanOnSave": {
+        "nazar.autoScan": {
           "type": "boolean",
           "default": true,
-          "description": "Dosya kaydedildiginde otomatik tara"
+          "description": "Dosya kaydedildiginde otomatik tarama yap"
+        },
+        "nazar.severity": {
+          "type": "string",
+          "default": "medium",
+          "enum": ["low", "medium", "high", "critical"],
+          "enumDescriptions": [
+            "Dusuk - tum sorunlari goster (Hint dahil)",
+            "Orta - orta ve ustu sorunlari goster",
+            "Yuksek - yuksek ve kritik sorunlari goster",
+            "Kritik - sadece kritik sorunlari goster"
+          ],
+          "description": "Minimum sorun seviyesi filtresi"
         },
         "nazar.pythonPath": {
           "type": "string",
           "default": "python3",
           "description": "Python yorumlayici yolu"
         },
-        "nazar.severityFilter": {
-          "type": "string",
-          "default": "warning",
-          "enum": ["info", "warning", "high", "critical"],
-          "description": "Minimum severity filtresi"
+        "nazar.studioPort": {
+          "type": "number",
+          "default": 8080,
+          "description": "Nazar Studio sunucu portu"
         }
       }
-    }
+    },
+    "problemMatchers": [
+      {
+        "name": "nazar",
+        "owner": "nazar",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": [
+          {
+            "regexp": "^\\[NAZAR\\]\\s+(error|warning|info|hint)\\s+(.+):(\\d+):\\s+(.+)$",
+            "severity": 1,
+            "file": 2,
+            "line": 3,
+            "message": 4
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",
