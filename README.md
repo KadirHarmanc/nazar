@@ -56,6 +56,9 @@ pip install nazar
 
 # Turkish spell checking support (optional)
 pip install nazar[turkish]
+
+# Live runtime testing on simulator/emulator (optional)
+curl -Ls "https://get.maestro.mobile.dev" | bash
 ```
 
 ### Run
