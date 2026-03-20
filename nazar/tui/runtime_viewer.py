@@ -116,6 +116,28 @@ class RuntimeViewer:
             if self._live:
                 self._live.update(self._render())
 
+    def display_screenshot(self, path: str) -> None:
+        """Screenshot'i terminalde goster (varsa term-image, yoksa dosya yolu)."""
+        console = Console()
+        try:
+            from term_image.image import from_file
+            img = from_file(path)
+            img.draw()
+            return
+        except (ImportError, Exception):
+            pass
+        # Fallback: dosya yolu + boyut
+        import os
+        size = ""
+        if os.path.exists(path):
+            size = f" ({os.path.getsize(path) // 1024}KB)"
+        console.print(Panel(
+            f"[dim]Screenshot kaydedildi{size}[/dim]\n"
+            f"[bold]{path}[/bold]\n"
+            f"[dim]Gormek icin: open {path}[/dim]",
+            title="[cyan]Screenshot[/cyan]", border_style="cyan",
+        ))
+
     def start(self) -> Live:
         """Canli gosterimi baslat. Context manager olarak kullanilabilir.
 

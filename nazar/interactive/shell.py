@@ -48,6 +48,7 @@ HELP_TEXT = """
   [cyan]rule[/cyan]          [dim]|[/dim] [cyan]kural[/cyan]       Kural yonetimi (olustur, dogrula, test, listele)
   [cyan]batch <y1> <y2>[/cyan]               Birden fazla projeyi tara
   [cyan]coverage[/cyan]      [dim]|[/dim] [cyan]kapsam[/cyan]      Test kapsami raporu (kategori, dosya, guven)
+  [cyan]ignore <rule>[/cyan]                 Kurali .nazarignore'a ekle
   [cyan]baseline save[/cyan]                Mevcut taramayi baseline olarak kaydet
   [cyan]baseline check[/cyan]               Baseline ile karsilastir (gerileme kontrolu)
   [cyan]run[/cyan]           [dim]|[/dim] [cyan]calistir[/cyan]    Maestro ile UI test calistir
@@ -65,8 +66,8 @@ HELP_TEXT = """
 
 
 class NazarCompleter(Completer):
-    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "coverage", "clear", "update", "live", "serve", "run", "rule", "batch", "baseline", "help", "quit",
-                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "kapsam", "temizle", "guncelle", "calistir", "kural", "toplu", "referans", "yardim", "cikis", "cat"]
+    COMMANDS = ["scan", "report", "detail", "guide", "export", "categories", "profiles", "stats", "coverage", "clear", "update", "live", "serve", "run", "rule", "batch", "baseline", "ignore", "help", "quit",
+                "tara", "rapor", "detay", "rehber", "kategoriler", "profiller", "kapsam", "temizle", "guncelle", "calistir", "kural", "toplu", "referans", "yoksay", "yardim", "cikis", "cat"]
     FILTERS = ["failed", "passed", "all", "security", "appstore", "code_quality", "ux_text", "ui_component", "cross_file"]
     FORMATS = ["html", "json", "sarif", "junit", "markdown"]
 
@@ -115,6 +116,8 @@ class NazarShell:
         self.results = None
         self.plan_data = None
         self.project_path = None
+        self._custom_categories = []
+        self._project_config = None
 
     def _show_header(self, welcome=False):
         """Banner goster (sadece acilista veya /clear'da)."""
@@ -179,6 +182,7 @@ class NazarShell:
             "coverage": self._coverage, "kapsam": self._coverage,
             "rule": lambda: self._rule(arg), "kural": lambda: self._rule(arg),
             "batch": lambda: self._batch(arg), "toplu": lambda: self._batch(arg),
+            "ignore": lambda: self._ignore(arg), "yoksay": lambda: self._ignore(arg),
             "baseline": lambda: self._baseline(arg), "referans": lambda: self._baseline(arg),
             "run": self._run_ui, "calistir": self._run_ui,
             "live": self._live, "serve": self._live,
@@ -236,7 +240,17 @@ class NazarShell:
         from nazar.planner.test_planner import TestPlanner
         from nazar.runners.orchestrator import TestOrchestrator
         from nazar.cache.scan_cache import ScanCache
+        from nazar.config.loader import ConfigLoader
         from rich.live import Live
+
+        # .nazar/config.yaml yukle (varsa)
+        self._project_config = ConfigLoader.load(self.project_path)
+        if self._project_config.profile:
+            self.console.print(f"  [dim]Config: profil={self._project_config.profile}[/dim]")
+        if self._project_config.min_confidence != 50:
+            self.console.print(f"  [dim]Config: min_confidence={self._project_config.min_confidence}[/dim]")
+        if self._project_config.ignore_rules:
+            self.console.print(f"  [dim]Config: {len(self._project_config.ignore_rules)} kural ignore edildi[/dim]")
 
         # Faz 0: Hizli on-analiz - proje tipini goster
         scan_start = time.time()
@@ -255,10 +269,15 @@ class NazarShell:
         if prev:
             self.console.print(f"  [dim]Onceki tarama: {prev['grade']} ({prev['pass_rate']}%) - {cache.time_since_last_scan()}[/dim]")
 
-        # Profil secim menusu
-        profile = self._select_profile(tech, prev)
-        if profile is None:
-            return
+        # Config'de profil ayarlanmissa direkt kullan
+        if hasattr(self, '_project_config') and self._project_config.profile:
+            profile = self._project_config.profile
+            self.console.print(f"\n  [green]Config profili: {profile}[/green]\n")
+        else:
+            # Profil secim menusu
+            profile = self._select_profile(tech, prev)
+            if profile is None:
+                return
 
         # Canli runtime test sorusu (mobil projeler icin)
         run_live_test = False
@@ -333,10 +352,19 @@ class NazarShell:
 
         # Faz 2: Planlama (secilen profil ile)
         plan_start = time.time()
-        plan_profile = "full" if profile in ("incremental", "diff") else profile
+        plan_profile = "full" if profile in ("incremental", "diff", "custom") else profile
         planner = TestPlanner(scan_result, profile=plan_profile)
         plan = planner.create_plan()
         self.plan_data = plan.to_dict()
+
+        # Custom profil: sadece secilen kategorileri tut
+        if profile == "custom" and hasattr(self, '_custom_categories') and self._custom_categories:
+            custom_set = set(self._custom_categories)
+            self.plan_data["tests"] = [
+                t for t in self.plan_data.get("tests", [])
+                if t.get("type", "other") in custom_set
+            ]
+            self.plan_data["total_tests"] = len(self.plan_data["tests"])
 
         # Incremental modda: plani degisen dosyalara gore filtrele
         if incremental_files is not None:
@@ -510,6 +538,38 @@ class NazarShell:
 
         except KeyboardInterrupt:
             self.console.print("\n[dim]Tarama iptal edildi.[/dim]")
+
+        # Config-based filtreleme: ignore_rules ve min_confidence
+        if hasattr(self, '_project_config') and self.results:
+            cfg = self._project_config
+            # ignore_rules: config'deki kurallari sonuclardan cikar
+            if cfg.ignore_rules:
+                ignored_set = set(cfg.ignore_rules)
+                before_count = len(self.results)
+                self.results = [
+                    r for r in self.results
+                    if r.get("subtype", "") not in ignored_set
+                ]
+                removed = before_count - len(self.results)
+                if removed > 0:
+                    self.console.print(f"\n  [dim]Config: {removed} sonuc ignore_rules ile filtrelendi[/dim]")
+                    # passed/failed yeniden hesapla
+                    passed = sum(1 for r in self.results if r.get("passed"))
+                    failed = len(self.results) - passed
+
+            # min_confidence: config'deki esik altindaki sonuclari filtrele
+            if cfg.min_confidence > 0:
+                before_count = len(self.results)
+                self.results = [
+                    r for r in self.results
+                    if not isinstance(r.get("confidence"), (int, float))
+                    or r.get("confidence", 100) >= cfg.min_confidence
+                ]
+                removed = before_count - len(self.results)
+                if removed > 0:
+                    self.console.print(f"  [dim]Config: {removed} sonuc min_confidence={cfg.min_confidence}% ile filtrelendi[/dim]")
+                    passed = sum(1 for r in self.results if r.get("passed"))
+                    failed = len(self.results) - passed
 
         total_dur = time.time() - start_time
         rate = (passed / len(self.results) * 100) if self.results else 0
@@ -915,6 +975,11 @@ class NazarShell:
         self.console.print(f"  [bold cyan][{idx}][/bold cyan] CI/CD (hizli)           [dim]Sadece kritik testler (~1dk)[/dim]")
         idx += 1
 
+        # 11. Ozel (kendin sec)
+        options.append(("custom", "Ozel (kendin sec)", "Kategorileri kendin sec", "~?dk"))
+        self.console.print(f"  [bold cyan][{idx}][/bold cyan] Ozel (kendin sec)       [dim]Kategorileri kendin sec[/dim]")
+        idx += 1
+
         self.console.print()
 
         try:
@@ -923,6 +988,8 @@ class NazarShell:
             ci = int(choice) - 1
             if 0 <= ci < len(options):
                 selected = options[ci]
+                if selected[0] == "custom":
+                    return self._select_custom_profile()
                 self.console.print(f"  [green]Secildi: {selected[1]}[/green]\n")
                 return selected[0]
         except (ValueError, KeyboardInterrupt, EOFError):
@@ -930,6 +997,66 @@ class NazarShell:
 
         self.console.print("  [dim]Iptal edildi.[/dim]\n")
         return None
+
+    def _select_custom_profile(self) -> str:
+        """Kullaniciya kategori secim ekrani goster, ozel profil olustur."""
+        ALL_CATEGORIES = [
+            ("security", "Guvenlik (OWASP, secret, crypto)"),
+            ("sca", "SCA (npm/pip audit, lisans)"),
+            ("taint", "Taint Tracking (SQL injection, XSS)"),
+            ("ast_analysis", "AST Analizi (eval, bare except)"),
+            ("code_quality", "Kod Kalitesi (complexity, dead code)"),
+            ("cross_file", "Cross-File (dead export, circular)"),
+            ("ui_component", "UI Component (a11y, touch, dark mode)"),
+            ("ux_text", "UX Text (yazim, tutarlilik, i18n)"),
+            ("api", "API (erisilebilirlik, response)"),
+            ("git", "Git (gitignore, buyuk dosya)"),
+            ("type_safety", "Type Safety (any, ts-ignore)"),
+            ("error_handling", "Error Handling (bos catch, async)"),
+            ("performance", "Performans (bundle, gorsel)"),
+            ("documentation", "Dokumantasyon (README, CHANGELOG)"),
+            ("naming", "Naming (dosya isimleri)"),
+            ("dependency", "Dependency (vulnerability)"),
+            ("accessibility", "Accessibility (testID, label)"),
+            ("docker", "Docker (image, secret)"),
+            ("appstore", "App Store (privacy, IAP)"),
+            ("playstore", "Play Store (targetSdk, ProGuard)"),
+            ("yaml_rules", "YAML Rules (ozel kural motoru)"),
+        ]
+
+        self.console.print()
+        self.console.print("  [bold]Kategori sec (virgul ile ayir, ornek: 1,3,5,7):[/bold]")
+        self.console.print()
+        for i, (key, desc) in enumerate(ALL_CATEGORIES, 1):
+            self.console.print(f"  [bold cyan][{i:>2}][/bold cyan] {desc}")
+        self.console.print()
+
+        try:
+            cat_choice = self.session.prompt(HTML('<style fg="#6366f1"><b>kategoriler</b></style><style fg="#475569">&gt; </style>'))
+            cat_choice = cat_choice.strip()
+            if not cat_choice:
+                self.console.print("  [dim]Iptal edildi.[/dim]\n")
+                return None
+
+            selected_cats = []
+            for part in cat_choice.split(","):
+                part = part.strip()
+                if part.isdigit():
+                    ci = int(part) - 1
+                    if 0 <= ci < len(ALL_CATEGORIES):
+                        selected_cats.append(ALL_CATEGORIES[ci][0])
+
+            if not selected_cats:
+                self.console.print("  [red]Gecerli kategori secilmedi.[/red]\n")
+                return None
+
+            self._custom_categories = selected_cats
+            cat_names = ", ".join(selected_cats)
+            self.console.print(f"  [green]Secildi: {cat_names}[/green]\n")
+            return "custom"
+        except (KeyboardInterrupt, EOFError):
+            self.console.print("  [dim]Iptal edildi.[/dim]\n")
+            return None
 
     # === Proje Dizini Teyit Sistemi ===
 
@@ -1080,6 +1207,46 @@ class NazarShell:
             table.add_row("[bold]Son Tarama[/bold]", f"[bold]{self.project_path}[/bold]")
             table.add_row("Gecen/Kalan", f"[green]{p}[/green] / [red]{f}[/red]")
         self.console.print(table)
+
+    def _ignore(self, rule_id: str):
+        """Kurali .nazarignore dosyasina ekle."""
+        if not rule_id:
+            self.console.print("\n[yellow]  Kullanim: ignore <rule_id>[/yellow]")
+            self.console.print("[dim]  Ornek: ignore todo_count[/dim]")
+            self.console.print("[dim]  Ornek: ignore naming_conventions[/dim]")
+            # Mevcut ignore listesini goster
+            if self.project_path:
+                ignore_file = Path(self.project_path) / ".nazarignore"
+                if ignore_file.exists():
+                    content = ignore_file.read_text(errors="ignore").strip()
+                    if content:
+                        self.console.print(f"\n[bold]  Mevcut .nazarignore:[/bold]")
+                        for line in content.splitlines():
+                            if line.strip() and not line.strip().startswith("#"):
+                                self.console.print(f"  [dim]{line.strip()}[/dim]")
+            self.console.print()
+            return
+
+        rule_id = rule_id.strip()
+        target_dir = self.project_path or os.getcwd()
+        ignore_file = Path(target_dir) / ".nazarignore"
+
+        # Dosya yoksa olustur
+        if not ignore_file.exists():
+            ignore_file.write_text("# Nazar Ignore File\n# Kural ignore: rule:kural_adi\n# Dosya ignore: dosya/pattern\n\n")
+
+        # Zaten var mi kontrol et
+        existing = ignore_file.read_text(errors="ignore")
+        rule_line = f"rule:{rule_id}"
+        if rule_line in existing:
+            self.console.print(f"\n[yellow]  '{rule_id}' zaten .nazarignore'da mevcut.[/yellow]\n")
+            return
+
+        # Ekle
+        with open(ignore_file, "a") as f:
+            f.write(f"{rule_line}\n")
+        self.console.print(f"\n[green]  '{rule_id}' .nazarignore'a eklendi.[/green]")
+        self.console.print(f"[dim]  Dosya: {ignore_file}[/dim]\n")
 
     def _coverage(self):
         """Test kapsami raporu goster."""

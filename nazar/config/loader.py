@@ -25,17 +25,29 @@ class NazarConfig:
     report_path: str = "nazar-report.html"
     plugin_dirs: List[str] = field(default_factory=list)
     custom_patterns: Dict[str, str] = field(default_factory=dict)
+    # .nazar/config.yaml destegi - yeni alanlar
+    profile: Optional[str] = None
+    min_confidence: int = 50
+    ignore_rules: List[str] = field(default_factory=list)
+    custom_dict: List[str] = field(default_factory=list)
 
 
 class ConfigLoader:
     """nazar.yaml dosyasini yukler."""
 
     CONFIG_NAMES = ["nazar.yaml", "nazar.yml", ".nazar.yaml", ".nazar.yml"]
+    DOT_NAZAR_CONFIG = [".nazar/config.yaml", ".nazar/config.yml"]
 
     @classmethod
     def load(cls, project_path: str) -> NazarConfig:
-        """Proje dizininden nazar.yaml yukle."""
+        """Proje dizininden nazar.yaml yukle. .nazar/config.yaml de desteklenir."""
         root = Path(project_path)
+        # Once .nazar/config.yaml kontrol et (oncelikli)
+        for name in cls.DOT_NAZAR_CONFIG:
+            config_file = root / name
+            if config_file.exists():
+                return cls._parse(config_file)
+        # Sonra proje kokunde nazar.yaml
         for name in cls.CONFIG_NAMES:
             config_file = root / name
             if config_file.exists():
@@ -78,6 +90,17 @@ class ConfigLoader:
         patterns = data.get("custom_patterns", {})
         if isinstance(patterns, dict):
             config.custom_patterns = patterns
+        # .nazar/config.yaml yeni alanlari
+        if "profile" in data and isinstance(data["profile"], str):
+            config.profile = data["profile"]
+        if "min_confidence" in data and isinstance(data["min_confidence"], int):
+            config.min_confidence = data["min_confidence"]
+        ignore_rules = data.get("ignore_rules", [])
+        if isinstance(ignore_rules, list):
+            config.ignore_rules = ignore_rules
+        custom_dict = data.get("custom_dict", [])
+        if isinstance(custom_dict, list):
+            config.custom_dict = custom_dict
         return config
 
     @classmethod
@@ -93,6 +116,11 @@ class ConfigLoader:
             "limits:", "  max_file_size_mb: 10", "  max_files: 500", "  timeout: 300", "",
             "parallel: 4", "cache: true", "output: html",
             "report: nazar-report.html", "plugins: []", "custom_patterns: {}", "",
+            "# Profil ve filtreleme (.nazar/config.yaml destegi)",
+            "# profile: security  # full, frontend, backend, security, mobile, ci",
+            "# min_confidence: 60  # 0-100 arasi guven esigi",
+            "# ignore_rules: [todo_count, naming_conventions]",
+            "# custom_dict: [myapp, signup]  # Spell check icin ozel sozluk", "",
         ]
         Path(output_path).write_text("\n".join(lines))
         return output_path

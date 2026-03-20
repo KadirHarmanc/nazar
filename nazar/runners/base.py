@@ -73,11 +73,48 @@ class BaseRunner:
         compiled = re.compile(pattern, flags)
         for f in files:
             content = self.read(f)
+            lines = content.split("\n")
             for m in compiled.finditer(content):
-                hits.append({"file": f, "line": content[:m.start()].count("\n") + 1, "match": m.group()[:80].replace("\n", " ").replace("\r", "")})
+                line_num = content[:m.start()].count("\n") + 1
+                # Inline ignore kontrolu: ust satir veya ayni satirdaki nazar-ignore
+                if subtype and self._check_inline_ignore(lines, line_num, subtype):
+                    continue
+                hits.append({"file": f, "line": line_num, "match": m.group()[:80].replace("\n", " ").replace("\r", "")})
         if subtype:
             hits = self.ignore_manager.filter_hits(hits, subtype)
         return hits
+
+    def _check_inline_ignore(self, lines: List[str], line_num: int, subtype: str) -> bool:
+        """Satir bazinda nazar-ignore kontrolu.
+
+        Ust satir veya ayni satirda '// nazar-ignore: subtype' veya '# nazar-ignore: subtype'
+        varsa True doner, o hit atlanir.
+        """
+        if line_num < 1 or line_num > len(lines):
+            return False
+        # Ayni satir kontrolu
+        current_line = lines[line_num - 1]
+        ignore_pat = re.compile(r'(?://|#)\s*nazar-ignore(?:[:\s]+(\S+))?')
+        m = ignore_pat.search(current_line)
+        if m:
+            specified = m.group(1)
+            if not specified or specified == subtype:
+                return True
+        # Ust satir kontrolu (nazar-ignore-next-line veya nazar-ignore)
+        if line_num >= 2:
+            prev_line = lines[line_num - 2]
+            m = ignore_pat.search(prev_line)
+            if m:
+                specified = m.group(1)
+                if not specified or specified == subtype:
+                    return True
+            # nazar-ignore-next-line formati
+            m2 = re.search(r'(?://|#)\s*nazar-ignore-next-line(?:[:\s]+(\S+))?', prev_line)
+            if m2:
+                specified = m2.group(1)
+                if not specified or specified == subtype:
+                    return True
+        return False
 
     def _filter_files(self, skip_test=True, skip_env=True, skip_nazar=True, limit=200) -> List[str]:
         """Dosyalari filtrele."""
@@ -103,8 +140,13 @@ class BaseRunner:
             hits = []
             for f in chunk:
                 content = self.read(f)
+                lines = content.split("\n")
                 for m in compiled.finditer(content):
-                    hits.append({"file": f, "line": content[:m.start()].count("\n") + 1, "match": m.group()[:80].replace("\n", " ").replace("\r", "")})
+                    line_num = content[:m.start()].count("\n") + 1
+                    # Inline ignore kontrolu
+                    if subtype and self._check_inline_ignore(lines, line_num, subtype):
+                        continue
+                    hits.append({"file": f, "line": line_num, "match": m.group()[:80].replace("\n", " ").replace("\r", "")})
             return hits
 
         chunks = [files[i:i + CHUNK_SIZE] for i in range(0, len(files), CHUNK_SIZE)]
