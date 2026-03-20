@@ -1148,17 +1148,35 @@ class NazarShell:
         self.console.print("  [bold cyan]Maestro Studio baslatiliyor...[/bold cyan]")
 
         try:
-            # Arka planda maestro studio baslat
+            # Arka planda maestro studio baslat (--no-window: biz kendimiz acacagiz)
             self._maestro_process = _sp.Popen(
-                [maestro_bin, "studio"],
+                [maestro_bin, "studio", "--no-window"],
                 cwd=str(project_path),
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
             )
-            # Maestro'nun baslamasini bekle
-            time.sleep(3)
 
-            if self._maestro_process.poll() is not None:
-                self.console.print("  [red]Maestro Studio baslatilAmadi[/red]")
+            # Maestro hazir olana kadar bekle (max 45sn)
+            import urllib.request
+            self.console.print("  [dim]Maestro baslatiliyor (ilk seferinde 20-30sn surebilir)...[/dim]")
+            ready = False
+            for tick in range(45):
+                if self._maestro_process.poll() is not None:
+                    self.console.print("  [red]Maestro Studio baslatılamadi[/red]")
+                    return
+                try:
+                    urllib.request.urlopen("http://localhost:9999", timeout=1)
+                    ready = True
+                    break
+                except Exception:
+                    pass
+                time.sleep(1)
+                if tick % 5 == 4:
+                    self.console.print(f"  [dim]Bekleniyor... ({tick+1}s)[/dim]")
+
+            if not ready:
+                self.console.print("  [red]Maestro Studio 45sn icinde baslatılamadi[/red]")
+                if self._maestro_process.poll() is None:
+                    self._maestro_process.kill()
                 return
 
             # Tarayiciyi ac
