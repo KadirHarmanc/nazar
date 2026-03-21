@@ -1394,68 +1394,22 @@ class NazarShell:
             self.console.print("  [yellow]UI test dosyasi bulunamadi[/yellow]")
             self.console.print("  [dim]Simulator izleme modunda baslatiliyor...[/dim]")
 
-        # 3. Nazar Live Test UI baslat
-        self.console.print()
-        self.console.print("  [bold cyan]Nazar Live Test baslatiliyor...[/bold cyan]")
+        # 3. Nazar Studio (native pencere) veya tarayici
+        if not yaml_files:
+            self.console.print("  [yellow]UI test dosyasi bulunamadi[/yellow]")
+            return
 
-        self._live_test_ui = NazarLiveTestUI(port=9999)
+        yaml_file = yaml_files[0]
+        self.console.print()
+        self.console.print(f"  [bold cyan]Nazar Studio baslatiliyor...[/bold cyan]")
+        self.console.print(f"  [dim]Test: {yaml_file.name}[/dim]")
 
         try:
-            if yaml_files:
-                # Ilk YAML dosyasini calistir
-                yaml_file = yaml_files[0]
-                self.console.print(f"  [dim]Test dosyasi: {yaml_file.name}[/dim]")
-                started = self._live_test_ui.start(str(yaml_file), auto_run=True)
-            else:
-                # Sadece simulator izleme modu
-                started = self._live_test_ui.start_server_only()
-
-            if not started:
-                self.console.print("  [red]Live Test UI baslatilamadi[/red]")
-                return
-
-            # Tarayiciyi ac
-            webbrowser.open("http://localhost:9999")
-
-            self.console.print(f"  [green]Nazar Live Test acildi:[/green] http://localhost:9999")
-            self.console.print("  [dim]Sol panel: Canli simulator ekrani (1sn arayla yenilenir)[/dim]")
-            self.console.print("  [dim]Sag panel: Test adimlari ve durum gostergeleri[/dim]")
-            self.console.print()
-
-            # YAML dosyalari bilgisi
-            if yaml_files:
-                self.console.print(f"  [bold]YAML test dosyalari ({len(yaml_files)}):[/bold]")
-                for yf in yaml_files:
-                    marker = "[cyan]>[/cyan] " if yf == yaml_files[0] else "  "
-                    self.console.print(f"    {marker}[cyan]{yf.name}[/cyan]")
-                self.console.print()
-                self.console.print(f"  [dim]Dosya yolu: {ui_dir}/[/dim]")
-
-            self.console.print()
-            try:
-                self.session.prompt(HTML('<style fg="#06b6d4"><b>Kapatmak icin Enter basin</b></style><style fg="#475569">&gt; </style>'))
-            except (KeyboardInterrupt, EOFError):
-                pass
-
-            # Sonuclari goster
-            if self._live_test_ui.tracker:
-                data = self._live_test_ui.tracker.get_data()
-                if data.get("total", 0) > 0:
-                    self.console.print()
-                    self.console.print(f"  [bold]Test Sonuclari:[/bold]")
-                    self.console.print(f"    [green]{data['passed']} gecti[/green]  "
-                                       f"[red]{data['failed']} kaldi[/red]  "
-                                       f"[yellow]{data.get('manual', 0)} manuel[/yellow]  "
-                                       f"[dim]{data['elapsed']}s[/dim]")
-
-            # Kapat
-            self._live_test_ui.stop()
-            self.console.print("  [dim]Nazar Live Test kapatildi[/dim]")
-
+            from nazar.live.studio import NazarStudio
+            studio = NazarStudio(port=9998)
+            studio.open(str(yaml_file))
         except Exception as e:
             self.console.print(f"  [red]Hata: {e}[/red]")
-            if hasattr(self, '_live_test_ui') and self._live_test_ui:
-                self._live_test_ui.stop()
 
     def _rule(self, arg):
         """Kural yonetim menusu."""

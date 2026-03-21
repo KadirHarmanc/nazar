@@ -1520,5 +1520,22 @@ def baseline_check(
             console.print(f"\n[bold green]OK: Gerileme yok. Baseline korunuyor.[/bold green]")
 
 
+@app.command()
+def studio(
+    yaml_file: str = typer.Argument(..., help="YAML test dosyasi yolu"),
+    port: int = typer.Option(9998, "--port", "-p", help="HTTP sunucu portu"),
+):
+    """Nazar Studio - Native pencerede canli test arayuzu.
+
+    Simulator ekranini ve YAML test adimlarini native desktop penceresinde gosterir.
+    pywebview kurulu degilse tarayicida acar.
+
+    Ornek: nazar studio .nazar/ui-tests/login-test.yml
+    """
+    from nazar.live.studio import NazarStudio
+    s = NazarStudio(port=port)
+    s.open(yaml_file)
+
+
 if __name__ == "__main__":
     app()

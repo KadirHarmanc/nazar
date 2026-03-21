@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nazar"
-version = "7.1.0"
+version = "7.2.0"
 description = "Autonomous testing tool - scans your project, understands architecture, plans and runs tests"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -33,6 +33,8 @@ dependencies = [
 
 [project.optional-dependencies]
 turkish = ["zeyrek>=0.1.0", "pyspellchecker>=0.7.2"]
+studio = ["pywebview>=5.0"]
+all = ["nazar[turkish]", "nazar[studio]"]
 dev = ["pytest>=7.4.0", "pytest-cov>=4.1.0", "black>=23.0", "ruff>=0.4.0", "mypy>=1.0"]
 
 [project.urls]
