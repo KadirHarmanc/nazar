@@ -1168,7 +1168,7 @@ class NazarLiveTestUI:
         self.device_name = get_device_name(self.platform)
 
         # Screenshot yakalayici baslat
-        self.screenshot = ScreenshotCapture(self.platform, interval=1.0)
+        self.screenshot = ScreenshotCapture(self.platform, interval=3.0)
         self.screenshot.start()
 
         # Tracker olustur
@@ -1182,7 +1182,8 @@ class NazarLiveTestUI:
         if not self.runner.parse():
             return False
 
-        # Runner'in tracker'ini bizimkiyle paylas
+        # Runner'in tracker'ini bizimkiyle paylas ve stepleri aktar
+        self.tracker.set_steps(self.runner._steps_raw, Path(yaml_file).name)
         self.runner.tracker = self.tracker
 
         # HTTP sunucu baslat
@@ -1214,7 +1215,7 @@ class NazarLiveTestUI:
 
         self.device_name = get_device_name(self.platform)
 
-        self.screenshot = ScreenshotCapture(self.platform, interval=1.0)
+        self.screenshot = ScreenshotCapture(self.platform, interval=3.0)
         self.screenshot.start()
 
         self.tracker = StepTracker()
