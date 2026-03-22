@@ -1,7 +1,7 @@
-"""Nazar Live Test UI - Maestro bagimliligini ortadan kaldiran canli test arayuzu.
+"""Nazar Live Test UI - YAML test adimlarini canli izleme arayuzu.
 
-Simulator/emulator ekranini canli olarak gosterir, YAML test adimlarini
-durum gostergeleriyle birlikte izleme imkani sunar.
+Simulator/emulator yan pencerede calisir, bu UI sadece test adimlarini gosterir.
+Screenshot capture yoktur - sifir overhead.
 
 Sadece Python stdlib kullanir (http.server, json, threading, subprocess).
 Harici bagimliligi yoktur.
@@ -13,12 +13,10 @@ Kullanim:
     ui.stop()
 """
 
-import base64
 import json
 import os
 import re
 import subprocess
-import shutil
 import threading
 import time
 from datetime import datetime
@@ -127,85 +125,6 @@ def get_device_name(platform: str) -> str:
             pass
         return "Android Emulator"
     return "Cihaz yok"
-
-
-# ============================================================
-# Ekran goruntusu yakalayici
-# ============================================================
-
-class ScreenshotCapture:
-    """Arka planda belirli araliklarla ekran goruntusu yakalar."""
-
-    def __init__(self, platform: str, interval: float = 1.0):
-        self.platform = platform
-        self.interval = interval
-        self._screenshot_path = "/tmp/nazar_screen.png"
-        self._lock = threading.Lock()
-        self._base64_cache: str = ""
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self):
-        """Yakalama dongusu baslat."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        """Yakalama dongusunu durdur."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=3)
-            self._thread = None
-
-    def get_base64(self) -> str:
-        """Son ekran goruntusunu base64 olarak dondur."""
-        with self._lock:
-            return self._base64_cache
-
-    def _capture_loop(self):
-        """Arka planda surekli ekran goruntusu yakala."""
-        while self._running:
-            try:
-                self._take_screenshot()
-                self._update_cache()
-            except Exception:
-                pass
-            time.sleep(self.interval)
-
-    def _take_screenshot(self):
-        """Platforma gore ekran goruntusu al."""
-        if self.platform == "ios":
-            subprocess.run(
-                ["xcrun", "simctl", "io", "booted", "screenshot", self._screenshot_path],
-                capture_output=True, timeout=5,
-            )
-        elif self.platform == "android":
-            # adb screencap komutunu kullan
-            try:
-                result = subprocess.run(
-                    ["adb", "exec-out", "screencap", "-p"],
-                    capture_output=True, timeout=5,
-                )
-                if result.returncode == 0 and result.stdout:
-                    with open(self._screenshot_path, "wb") as f:
-                        f.write(result.stdout)
-            except Exception:
-                pass
-
-    def _update_cache(self):
-        """Screenshot dosyasini oku ve base64'e cevir."""
-        try:
-            if os.path.exists(self._screenshot_path):
-                with open(self._screenshot_path, "rb") as f:
-                    data = f.read()
-                if data:
-                    with self._lock:
-                        self._base64_cache = base64.b64encode(data).decode("ascii")
-        except Exception:
-            pass
 
 
 # ============================================================
@@ -705,44 +624,18 @@ TEST_UI_HTML = r"""<!DOCTYPE html>
 html,body{height:100%;overflow:hidden}
 body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation Mono',monospace;background:var(--bg);color:var(--text);line-height:1.5}
 
-/* Ana duzenleme */
-.layout{display:flex;height:100vh;width:100%}
-
-/* Sol panel - Simulator ekrani */
-.left-panel{
-  width:60%;height:100%;display:flex;flex-direction:column;
-  border-right:1px solid var(--border);
+.main-panel{
+  width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;
 }
-.left-header{
+.top-header{
   padding:12px 20px;border-bottom:1px solid var(--border);background:var(--bg2);
-  display:flex;align-items:center;gap:12px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
 }
-.left-header h2{font-size:.85rem;color:var(--text2);font-weight:600;letter-spacing:1px}
+.top-header-left{display:flex;align-items:center;gap:12px}
+.top-header h2{font-size:.85rem;color:var(--text2);font-weight:600;letter-spacing:1px}
 .device-badge{
   padding:2px 10px;border-radius:10px;font-size:.7rem;font-weight:600;
   background:var(--cyan-bg);color:var(--cyan);
-}
-.screen-wrap{
-  flex:1;display:flex;align-items:center;justify-content:center;
-  padding:16px;overflow:hidden;background:#000;
-}
-.screen-wrap img{
-  max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;
-  box-shadow:0 0 40px rgba(0,0,0,.6);
-}
-.no-screen{
-  text-align:center;color:var(--text3);
-}
-.no-screen .icon{font-size:3rem;margin-bottom:12px;opacity:.4}
-.no-screen p{font-size:.85rem}
-
-/* Sag panel - Test adimlari */
-.right-panel{
-  width:40%;height:100%;display:flex;flex-direction:column;overflow:hidden;
-}
-.right-header{
-  padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg2);
-  display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
 }
 .yaml-title{font-size:.85rem;font-weight:700;color:var(--cyan)}
 .run-status{
@@ -757,10 +650,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
   flex:1;overflow-y:auto;padding:8px 0;
 }
 
-/* Adim satiri */
 .step-row{
   display:flex;align-items:flex-start;gap:10px;
-  padding:8px 16px;border-bottom:1px solid rgba(48,54,61,.5);
+  padding:10px 20px;border-bottom:1px solid rgba(48,54,61,.5);
   transition:background .2s;border-left:3px solid transparent;
 }
 .step-row:hover{background:var(--bg2)}
@@ -770,8 +662,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 .step-row.manual-row{background:rgba(188,140,255,.06);border-left-color:var(--purple)}
 
 .step-num{
-  width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:.7rem;font-weight:700;flex-shrink:0;margin-top:1px;
+  width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:.75rem;font-weight:700;flex-shrink:0;margin-top:1px;
 }
 .step-num.pending{background:var(--bg3);color:var(--text3)}
 .step-num.running{background:var(--yellow-bg);color:var(--yellow)}
@@ -780,17 +672,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 .step-num.manual{background:rgba(188,140,255,.15);color:var(--purple)}
 
 .step-content{flex:1;min-width:0}
-.step-action{font-size:.8rem;font-weight:600}
+.step-action{font-size:.85rem;font-weight:600}
 .keyword{color:var(--cyan)}
 .target-text{color:var(--green)}
 .value-text{color:var(--orange)}
-.step-detail{font-size:.72rem;color:var(--text3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.step-error{font-size:.72rem;color:var(--red);margin-top:2px}
+.step-detail{font-size:.75rem;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step-error{font-size:.75rem;color:var(--red);margin-top:2px}
 .step-error.manual-err{color:var(--purple)}
 
 .step-status{width:22px;flex-shrink:0;text-align:center;font-size:.9rem;margin-top:2px}
 
-/* Spinner animasyonu */
 @keyframes spin{to{transform:rotate(360deg)}}
 .spinner-icon{
   display:inline-block;width:14px;height:14px;
@@ -798,9 +689,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
   border-radius:50%;animation:spin .8s linear infinite;
 }
 
-/* Alt cubuk */
 .bottom-bar{
-  padding:10px 16px;border-top:1px solid var(--border);background:var(--bg2);
+  padding:10px 20px;border-top:1px solid var(--border);background:var(--bg2);
   flex-shrink:0;
 }
 .progress-wrap{
@@ -815,65 +705,42 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 }
 .stats-row{
   display:flex;align-items:center;justify-content:space-between;
-  font-size:.72rem;color:var(--text2);
+  font-size:.75rem;color:var(--text2);
 }
 .stat{display:flex;align-items:center;gap:4px}
 .stat .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .dot.green-dot{background:var(--green)}.dot.red-dot{background:var(--red)}
 .dot.yellow-dot{background:var(--yellow)}.dot.purple-dot{background:var(--purple)}
 
-/* Scrollbar */
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:var(--bg)}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:var(--text3)}
-
-/* Responsive */
-@media(max-width:900px){
-  .layout{flex-direction:column}
-  .left-panel{width:100%;height:50%}
-  .right-panel{width:100%;height:50%}
-}
 </style>
 </head>
 <body>
-<div class="layout">
-  <!-- Sol Panel: Simulator Ekrani -->
-  <div class="left-panel">
-    <div class="left-header">
+<div class="main-panel">
+  <div class="top-header">
+    <div class="top-header-left">
       <h2>NAZAR LIVE TEST</h2>
       <span class="device-badge" id="deviceBadge">Cihaz algilaniyor...</span>
-    </div>
-    <div class="screen-wrap" id="screenWrap">
-      <div class="no-screen" id="noScreen">
-        <div class="icon">[ ]</div>
-        <p>Simulator ekrani yukleniyor...</p>
-      </div>
-      <img id="screenImg" style="display:none" alt="Simulator Screen">
-    </div>
-  </div>
-
-  <!-- Sag Panel: Test Adimlari -->
-  <div class="right-panel">
-    <div class="right-header">
       <span class="yaml-title" id="yamlTitle">test.yaml</span>
-      <span class="run-status idle" id="runStatus">Bekliyor</span>
     </div>
-    <div class="steps-list" id="stepsList">
+    <span class="run-status idle" id="runStatus">Bekliyor</span>
+  </div>
+  <div class="steps-list" id="stepsList"></div>
+  <div class="bottom-bar">
+    <div class="progress-wrap">
+      <div class="progress-fill" id="progressFill" style="width:0%"></div>
     </div>
-    <div class="bottom-bar">
-      <div class="progress-wrap">
-        <div class="progress-fill" id="progressFill" style="width:0%"></div>
+    <div class="stats-row">
+      <div style="display:flex;gap:12px">
+        <span class="stat"><span class="dot green-dot"></span> <span id="passedCount">0</span> gecti</span>
+        <span class="stat"><span class="dot red-dot"></span> <span id="failedCount">0</span> kaldi</span>
+        <span class="stat"><span class="dot purple-dot"></span> <span id="manualCount">0</span> manuel</span>
+        <span class="stat"><span class="dot yellow-dot"></span> <span id="pendingCount">0</span> bekliyor</span>
       </div>
-      <div class="stats-row">
-        <div style="display:flex;gap:12px">
-          <span class="stat"><span class="dot green-dot"></span> <span id="passedCount">0</span> gecti</span>
-          <span class="stat"><span class="dot red-dot"></span> <span id="failedCount">0</span> kaldi</span>
-          <span class="stat"><span class="dot purple-dot"></span> <span id="manualCount">0</span> manuel</span>
-          <span class="stat"><span class="dot yellow-dot"></span> <span id="pendingCount">0</span> bekliyor</span>
-        </div>
-        <span id="elapsed" style="color:#8b949e">0.0s</span>
-      </div>
+      <span id="elapsed" style="color:#8b949e">0.0s</span>
     </div>
   </div>
 </div>
@@ -882,8 +749,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 (function() {
   'use strict';
 
-  var screenImg = document.getElementById('screenImg');
-  var noScreen = document.getElementById('noScreen');
   var stepsList = document.getElementById('stepsList');
   var progressFill = document.getElementById('progressFill');
   var yamlTitle = document.getElementById('yamlTitle');
@@ -928,17 +793,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
     else if (st === 'failed') row.className += ' failed-row';
     else if (st === 'manual') row.className += ' manual-row';
 
-    // Numara
     var numEl = document.createElement('div');
     numEl.className = 'step-num ' + st;
     numEl.textContent = String(index + 1);
     row.appendChild(numEl);
 
-    // Icerik
     var content = document.createElement('div');
     content.className = 'step-content';
 
-    // Aksiyon satiri
     var actionDiv = document.createElement('div');
     actionDiv.className = 'step-action';
 
@@ -961,7 +823,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
     }
     content.appendChild(actionDiv);
 
-    // Aciklama
     if (step.description) {
       var desc = document.createElement('div');
       desc.className = 'step-detail';
@@ -969,7 +830,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
       content.appendChild(desc);
     }
 
-    // Hata
     if (step.error && st === 'failed') {
       var err = document.createElement('div');
       err.className = 'step-error';
@@ -985,7 +845,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 
     row.appendChild(content);
 
-    // Durum ikonu
     var statusCell = document.createElement('div');
     statusCell.className = 'step-status';
     statusCell.appendChild(createStatusIcon(st));
@@ -999,36 +858,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 
     yamlTitle.textContent = data.yaml_name || 'test.yaml';
 
+    if (data.device) {
+      deviceBadge.textContent = data.device;
+    }
+
     var overall = data.overall_status || 'idle';
     runStatus.textContent = statusLabels[overall] || overall;
     runStatus.className = 'run-status ' + overall;
 
-    // Adim listesini DOM API ile olustur
     var fragment = document.createDocumentFragment();
     for (var i = 0; i < data.steps.length; i++) {
       fragment.appendChild(buildStepRow(data.steps[i], i));
     }
 
-    // Mevcut listeyi temizle ve yenisini ekle
     while (stepsList.firstChild) {
       stepsList.removeChild(stepsList.firstChild);
     }
     stepsList.appendChild(fragment);
 
-    // Aktif adimi gorunur yap
     var active = stepsList.querySelector('.active');
     if (active) {
       active.scrollIntoView({behavior: 'smooth', block: 'center'});
     }
 
-    // Istatistikler
     document.getElementById('passedCount').textContent = data.passed || 0;
     document.getElementById('failedCount').textContent = data.failed || 0;
     document.getElementById('manualCount').textContent = data.manual || 0;
     document.getElementById('pendingCount').textContent = data.pending || 0;
     document.getElementById('elapsed').textContent = (data.elapsed || 0) + 's';
 
-    // Progress bar
     var pct = data.progress || 0;
     progressFill.style.width = pct + '%';
     if (data.failed > 0) {
@@ -1038,22 +896,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
     }
   }
 
-  function refreshScreen() {
-    fetch('/api/screenshot')
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        if (d.image) {
-          screenImg.src = 'data:image/png;base64,' + d.image;
-          screenImg.style.display = 'block';
-          noScreen.style.display = 'none';
-        }
-        if (d.device) {
-          deviceBadge.textContent = d.device;
-        }
-      })
-      .catch(function() {});
-  }
-
   function refreshSteps() {
     fetch('/api/steps')
       .then(function(r) { return r.json(); })
@@ -1061,12 +903,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
       .catch(function() {});
   }
 
-  // Ilk yukleme
-  refreshScreen();
   refreshSteps();
-
-  // Otomatik yenileme
-  setInterval(refreshScreen, 1000);
   setInterval(refreshSteps, 500);
 })();
 </script>
@@ -1105,13 +942,9 @@ class _TestUIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         ui: NazarLiveTestUI = self.server._nazar_test_ui
 
-        if self.path == "/api/screenshot":
-            b64 = ui.screenshot.get_base64() if ui.screenshot else ""
-            device = ui.device_name
-            self._send_json({"image": b64, "device": device})
-
-        elif self.path == "/api/steps":
+        if self.path == "/api/steps":
             data = ui.tracker.get_data() if ui.tracker else {}
+            data["device"] = ui.device_name
             self._send_json(data)
 
         elif self.path == "/" or self.path == "/index.html":
@@ -1144,14 +977,13 @@ class NazarLiveTestUI:
         self.port = port
         self.platform = "none"
         self.device_name = "Cihaz algilaniyor..."
-        self.screenshot: Optional[ScreenshotCapture] = None
         self.tracker: Optional[StepTracker] = None
         self.runner: Optional[NazarTestRunner] = None
         self._server: Optional[HTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
 
     def start(self, yaml_file: str, auto_run: bool = True) -> bool:
-        """Sunucuyu baslat, ekran yakalamayi etkinlestir ve testleri calistir.
+        """Sunucuyu baslat ve testleri calistir.
 
         Args:
             yaml_file: YAML test dosyasinin yolu.
@@ -1166,10 +998,6 @@ class NazarLiveTestUI:
             return False
 
         self.device_name = get_device_name(self.platform)
-
-        # Screenshot yakalayici baslat
-        self.screenshot = ScreenshotCapture(self.platform, interval=3.0)
-        self.screenshot.start()
 
         # Tracker olustur
         self.tracker = StepTracker()
@@ -1205,19 +1033,12 @@ class NazarLiveTestUI:
         return True
 
     def start_server_only(self) -> bool:
-        """Sadece sunucu + screenshot baslat (test olmadan).
-
-        Simulator izleme modu - YAML dosyasi gerekmez.
-        """
+        """Sadece sunucu baslat (test olmadan)."""
         self.platform = detect_platform()
         if self.platform == "none":
             return False
 
         self.device_name = get_device_name(self.platform)
-
-        self.screenshot = ScreenshotCapture(self.platform, interval=3.0)
-        self.screenshot.start()
-
         self.tracker = StepTracker()
 
         try:
@@ -1237,10 +1058,6 @@ class NazarLiveTestUI:
         if self.runner:
             self.runner.stop()
             self.runner = None
-
-        if self.screenshot:
-            self.screenshot.stop()
-            self.screenshot = None
 
         if self._server:
             self._server.shutdown()
