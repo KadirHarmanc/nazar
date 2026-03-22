@@ -1,89 +1,20 @@
 """Nazar Studio - Native desktop UI for live testing.
 
-Simulator penceresi sola, test adimlari penceresi saga otomatik konumlanir.
-Screenshot capture yoktur - sifir overhead.
+pywebview ile simulator ekranini ve test adimlarini native pencerede gosterir.
 pywebview yoksa tarayicida acar (fallback).
 """
-import subprocess
-import sys
+import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
 
-def _position_windows_side_by_side(studio_title: str):
-    """macOS'ta Simulator ve NazarStudio pencerelerini yan yana konumla.
-
-    Sol yari: Simulator.app
-    Sag yari: NazarStudio penceresi
-    """
-    if sys.platform != "darwin":
-        return
-
-    script = f'''
-    tell application "System Events"
-        -- Ekran boyutunu al
-        set screenSize to {{1440, 900}}
-        try
-            set screenSize to size of scroll area 1 of application process "Finder"
-        end try
-        try
-            tell application process "Finder"
-                set screenSize to size of window 1
-            end tell
-        end try
-
-        set screenW to item 1 of screenSize
-        set screenH to item 2 of screenSize
-        set halfW to (screenW div 2)
-
-        -- Simulator.app sola konumla
-        try
-            tell application process "Simulator"
-                set position of window 1 to {{0, 0}}
-                set size of window 1 to {{halfW, screenH}}
-            end tell
-        end try
-
-        -- Nazar Studio saga konumla
-        delay 0.5
-        try
-            tell application process "Nazar Studio"
-                set position of window 1 to {{halfW, 0}}
-                set size of window 1 to {{halfW, screenH}}
-            end tell
-        end try
-        try
-            tell application process "Python"
-                repeat with w in windows
-                    if name of w contains "{studio_title}" then
-                        set position of w to {{halfW, 0}}
-                        set size of w to {{halfW, screenH}}
-                        exit repeat
-                    end if
-                end repeat
-            end tell
-        end try
-    end tell
-    '''
-    try:
-        subprocess.Popen(
-            ["osascript", "-e", script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, OSError):
-        pass
-
-
 class NazarStudio:
-    """Nazar Live Test'i native desktop penceresinde gosterir.
+    """Nazar Live Test'i native desktop penceresinde gosterir."""
 
-    Simulator penceresi sol yarida, test adimlari sag yarida konumlanir.
-    Screenshot capture yoktur - Simulator'u direkt kendi penceresinde gorursunuz.
-    """
-
-    def __init__(self, title="Nazar Studio", width=600, height=800, port=9998):
+    def __init__(self, title="Nazar Studio", width=1200, height=800, port=9998):
         self.title = title
         self.width = width
         self.height = height
@@ -92,7 +23,7 @@ class NazarStudio:
         self._window = None
 
     def open(self, yaml_file: str, auto_run: bool = True):
-        """Test arayuzunu ac ve pencereleri yan yana konumla.
+        """Native pencerede canli test arayuzunu ac.
 
         Args:
             yaml_file: YAML test dosyasinin yolu.
@@ -100,15 +31,18 @@ class NazarStudio:
         """
         from nazar.live.test_ui import NazarLiveTestUI
 
+        # 1. HTTP server + screenshot + test runner baslat
         self._test_ui = NazarLiveTestUI(port=self.port)
         ok = self._test_ui.start(yaml_file, auto_run=auto_run)
         if not ok:
             print("Hata: Live test baslatılamadi (simulator/emulator acik mi?)")
             return False
 
+        # Pencere basligina YAML adini ekle
         yaml_name = Path(yaml_file).stem
         window_title = f"{self.title} - {yaml_name}"
 
+        # 2. Native pencere ac
         try:
             import webview
 
@@ -117,34 +51,35 @@ class NazarStudio:
                 f"http://localhost:{self.port}",
                 width=self.width,
                 height=self.height,
-                min_size=(400, 600),
-                background_color="#0d1117",
+                min_size=(800, 600),
+                background_color="#0f172a",
                 text_select=False,
             )
 
+            # Pencere kapatildiginda cleanup
             self._window.events.closing += self._on_closing
 
-            # Pencere acildiktan sonra konumla
-            self._window.events.shown += lambda: _position_windows_side_by_side(window_title)
-
+            # Main thread'de calistir (macOS Cocoa gerekliligi)
             webview.start(debug=False)
 
         except ImportError:
+            # pywebview yok - tarayicida ac
             import webbrowser
             webbrowser.open(f"http://localhost:{self.port}")
             print(f"\nNazar Studio: http://localhost:{self.port}")
-            print("Simulator'u yan tarafa konumlayin.")
+            print("pywebview kurulu degil - tarayicida acildi")
             print("Native pencere icin: pip install pywebview")
             try:
                 input("\nKapatmak icin Enter basin...")
             except (KeyboardInterrupt, EOFError):
                 pass
 
+        # 3. Temizlik
         self._cleanup()
         return True
 
     def open_viewer_only(self):
-        """Sadece test adimi izleme modu (test calistirmadan)."""
+        """Sadece simulator izleme modu (test calistirmadan)."""
         from nazar.live.test_ui import NazarLiveTestUI
 
         self._test_ui = NazarLiveTestUI(port=self.port)
@@ -153,20 +88,17 @@ class NazarStudio:
             print("Hata: Simulator bulunamadi")
             return False
 
-        window_title = f"{self.title} - Viewer"
-
         try:
             import webview
             self._window = webview.create_window(
-                window_title,
+                f"{self.title} - Viewer",
                 f"http://localhost:{self.port}",
                 width=self.width,
                 height=self.height,
-                min_size=(400, 600),
-                background_color="#0d1117",
+                min_size=(800, 600),
+                background_color="#0f172a",
             )
             self._window.events.closing += self._on_closing
-            self._window.events.shown += lambda: _position_windows_side_by_side(window_title)
             webview.start(debug=False)
         except ImportError:
             import webbrowser
@@ -184,7 +116,7 @@ class NazarStudio:
         self._cleanup()
 
     def _cleanup(self):
-        """Server thread'lerini durdur."""
+        """Server ve screenshot thread'lerini durdur."""
         if self._test_ui:
             self._test_ui.stop()
             self._test_ui = None

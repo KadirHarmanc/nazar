@@ -1,7 +1,7 @@
-"""Nazar Live Test UI - YAML test adimlarini canli izleme arayuzu.
+"""Nazar Live Test UI - Maestro bagimliligini ortadan kaldiran canli test arayuzu.
 
-Simulator/emulator yan pencerede calisir, bu UI sadece test adimlarini gosterir.
-Screenshot capture yoktur - sifir overhead.
+Simulator/emulator ekranini canli olarak gosterir, YAML test adimlarini
+durum gostergeleriyle birlikte izleme imkani sunar.
 
 Sadece Python stdlib kullanir (http.server, json, threading, subprocess).
 Harici bagimliligi yoktur.
@@ -13,14 +13,17 @@ Kullanim:
     ui.stop()
 """
 
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
+import zlib
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer as HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -125,6 +128,207 @@ def get_device_name(platform: str) -> str:
             pass
         return "Android Emulator"
     return "Cihaz yok"
+
+
+# ============================================================
+# Ekran goruntusu yakalayici
+# ============================================================
+
+class ScreenshotCapture:
+    """Arka planda adaptif FPS ile ekran goruntusu yakalar.
+
+    Optimizasyonlar:
+    - Disk I/O sifir: iOS ve Android stdout pipe uzerinden okur
+    - CRC32 karsilastirma: Ekran degismediyse islem atlanir
+    - JPEG binary: base64 encode yok, MJPEG stream'e direkt verilir
+    - ffmpeg varsa yarim cozunurluge kucultme (pipe ile, shell=False)
+    - Pillow fallback: ffmpeg yoksa Pillow ile resize + Android PNG->JPEG
+    - Adaptif FPS: 0.5-10fps arasi, degisiklik varsa hizlan yoksa yavasla
+    - Keep-alive: ekran degismese bile min 1s'de bir son frame gonderilir
+    - Event-driven: _frame_event ile MJPEG handler bekler
+    """
+
+    _MIN_INTERVAL = 0.1   # 10 fps maks
+    _MAX_INTERVAL = 2.0   # 0.5 fps min
+    _KEEPALIVE_S = 1.0    # Ekran degismese bile 1s'de bir frame isle
+
+    def __init__(self, platform: str, interval: float = 0.3):
+        self.platform = platform
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._jpeg_frame: bytes = b""
+        self._last_crc: int = 0
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._has_client = False
+        self._last_client_time: float = 0
+        self._last_change_time: float = 0
+        self._frame_event = threading.Event()
+        # ffmpeg ve Pillow varligini bir kere kontrol et
+        self._has_ffmpeg: bool = shutil.which("ffmpeg") is not None
+        self._pil_image = None
+        try:
+            from PIL import Image
+            self._pil_image = Image
+        except ImportError:
+            pass
+
+    def start(self):
+        """Yakalama dongusu baslat."""
+        if self._running:
+            return
+        self._running = True
+        self._last_change_time = time.monotonic()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Yakalama dongusunu durdur."""
+        self._running = False
+        self._frame_event.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+            self._thread = None
+
+    def get_jpeg(self) -> bytes:
+        """Son frame'i binary JPEG olarak dondur."""
+        self._last_client_time = time.monotonic()
+        self._has_client = True
+        with self._lock:
+            return self._jpeg_frame
+
+    def wait_frame(self, timeout: float = 2.0) -> bool:
+        """Yeni frame gelene kadar bekle. True=frame var, False=timeout."""
+        self._frame_event.clear()
+        return self._frame_event.wait(timeout=timeout)
+
+    def _capture_loop(self):
+        """Arka planda adaptif FPS ile ekran goruntusu yakala."""
+        adaptive_interval = self.interval
+        while self._running:
+            try:
+                # Client 10 saniyedir istek atmadiysa yakalama yapma
+                if self._has_client and (time.monotonic() - self._last_client_time) > 10:
+                    time.sleep(adaptive_interval)
+                    continue
+
+                raw = self._take_screenshot()
+                if raw:
+                    changed = self._update_frame(raw)
+                    now = time.monotonic()
+                    if changed:
+                        # Ekran degisti -> hizlan
+                        adaptive_interval = max(self._MIN_INTERVAL,
+                                                adaptive_interval * 0.7)
+                        self._last_change_time = now
+                    else:
+                        # Ekran ayni -> yavasla
+                        adaptive_interval = min(self._MAX_INTERVAL,
+                                                adaptive_interval * 1.3)
+                        # Keep-alive: 1s'de bir son frame'i yeniden isle
+                        if (now - self._last_change_time) >= self._KEEPALIVE_S:
+                            self._frame_event.set()
+                            self._last_change_time = now
+            except Exception:
+                pass
+            time.sleep(adaptive_interval)
+
+    def _take_screenshot(self) -> Optional[bytes]:
+        """Platforma gore ekran goruntusu al, stdout pipe ile binary dondur."""
+        if self.platform == "ios":
+            try:
+                # stdout'a JPEG yaz, diske dokunma
+                result = subprocess.run(
+                    ["xcrun", "simctl", "io", "booted", "screenshot",
+                     "--type=jpeg", "--mask=ignored", "-"],
+                    capture_output=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout:
+                    return result.stdout
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        elif self.platform == "android":
+            try:
+                # Android screencap PNG verir
+                result = subprocess.run(
+                    ["adb", "exec-out", "screencap", "-p"],
+                    capture_output=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout:
+                    return result.stdout
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        return None
+
+    def _png_to_jpeg(self, png_data: bytes) -> bytes:
+        """PNG veriyi JPEG'e cevir. Pillow varsa kullan, yoksa PNG dondur."""
+        if self._pil_image is None:
+            return png_data
+        try:
+            img = self._pil_image.open(io.BytesIO(png_data))
+            if img.mode == "RGBA":
+                img = img.convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=70)
+            return buf.getvalue()
+        except Exception:
+            return png_data
+
+    def _resize_jpeg(self, jpeg_data: bytes) -> bytes:
+        """JPEG'i yarim cozunurluge kucult. ffmpeg > Pillow > ham veri."""
+        if self._has_ffmpeg:
+            return self._resize_ffmpeg(jpeg_data)
+        if self._pil_image is not None:
+            return self._resize_pillow(jpeg_data)
+        return jpeg_data
+
+    def _resize_ffmpeg(self, data: bytes) -> bytes:
+        """ffmpeg ile pipe uzerinden yarim cozunurluge kucult."""
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["ffmpeg", "-y", "-f", "image2pipe", "-i", "pipe:0",
+                 "-vf", "scale=iw/2:ih/2", "-f", "image2", "-vcodec",
+                 "mjpeg", "-q:v", "5", "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            out, _ = proc.communicate(input=data, timeout=3)
+            if proc.returncode == 0 and out:
+                return out
+        except (subprocess.TimeoutExpired, OSError):
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+        return data
+
+    def _resize_pillow(self, jpeg_data: bytes) -> bytes:
+        """Pillow ile yarim cozunurluge kucult."""
+        try:
+            img = self._pil_image.open(io.BytesIO(jpeg_data))
+            half = (img.width // 2, img.height // 2)
+            img.thumbnail(half)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=70)
+            return buf.getvalue()
+        except Exception:
+            return jpeg_data
+
+    def _update_frame(self, data: bytes) -> bool:
+        """Ekran degistiyse JPEG frame'i guncelle. True=degisti."""
+        data_crc = zlib.crc32(data)
+        if data_crc == self._last_crc:
+            return False
+
+        self._last_crc = data_crc
+        # Android PNG -> JPEG cevirimi
+        if self.platform == "android":
+            data = self._png_to_jpeg(data)
+        # Yarim cozunurluge kucult (opsiyonel)
+        data = self._resize_jpeg(data)
+        with self._lock:
+            self._jpeg_frame = data
+        self._frame_event.set()
+        return True
 
 
 # ============================================================
@@ -609,140 +813,246 @@ TEST_UI_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nazar Live Test</title>
+<title>Nazar Studio</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;
-  --text:#e6edf3;--text2:#8b949e;--text3:#484f58;
-  --green:#3fb950;--green-bg:rgba(63,185,80,.12);
-  --red:#f85149;--red-bg:rgba(248,81,73,.12);
-  --yellow:#d29922;--yellow-bg:rgba(210,153,34,.15);
-  --cyan:#58a6ff;--cyan-bg:rgba(88,166,255,.12);
-  --purple:#bc8cff;--orange:#d18616;
+  --black:#000;--white:#fff;
+  --g1:#0a0a0a;--g2:#111;--g3:#1a1a1a;--g4:#222;--g5:#333;--g6:#555;--g7:#888;--g8:#aaa;--g9:#ccc;--g10:#e5e5e5;
+  --ok:#fff;--ok-bg:rgba(255,255,255,.08);
+  --fail:#fff;--fail-bg:rgba(255,255,255,.04);
+  --active-bg:rgba(255,255,255,.03);
+  --radius:6px;
 }
 html,body{height:100%;overflow:hidden}
-body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation Mono',monospace;background:var(--bg);color:var(--text);line-height:1.5}
+body{font-family:'SF Pro Text',-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;background:var(--black);color:var(--white);line-height:1.5;-webkit-font-smoothing:antialiased}
 
-.main-panel{
-  width:100%;height:100vh;display:flex;flex-direction:column;overflow:hidden;
+.layout{display:flex;height:100vh;width:100%}
+
+/* ---- Sol: Simulator ---- */
+.left-panel{
+  width:55%;height:100%;display:flex;flex-direction:column;
+  border-right:1px solid var(--g3);
 }
-.top-header{
-  padding:12px 20px;border-bottom:1px solid var(--border);background:var(--bg2);
+.panel-header{
+  padding:14px 24px;border-bottom:1px solid var(--g3);background:var(--g1);
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
+  -webkit-app-region:drag;
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{
+  width:28px;height:28px;border-radius:var(--radius);
+  background:var(--white);display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:.75rem;color:var(--black);letter-spacing:-.5px;
+}
+.brand-text{font-size:.8rem;font-weight:600;color:var(--g8);letter-spacing:.5px;text-transform:uppercase}
+.device-chip{
+  padding:4px 12px;border-radius:100px;font-size:.68rem;font-weight:500;
+  background:var(--g3);color:var(--g7);border:1px solid var(--g4);
+  -webkit-app-region:no-drag;
+}
+.screen-area{
+  flex:1;display:flex;align-items:center;justify-content:center;
+  padding:20px;overflow:hidden;background:var(--black);position:relative;
+}
+.screen-area img{
+  max-width:100%;max-height:100%;object-fit:contain;border-radius:12px;
+  box-shadow:0 8px 60px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.06);
+  transition:opacity .3s;
+}
+.screen-area img.is-loaded ~ .placeholder{display:none}
+.placeholder{text-align:center;color:var(--g5)}
+.placeholder-icon{
+  width:48px;height:48px;border:2px solid var(--g4);border-radius:12px;
+  margin:0 auto 16px;display:flex;align-items:center;justify-content:center;
+}
+.placeholder-icon svg{width:24px;height:24px;stroke:var(--g5);fill:none;stroke-width:1.5}
+.placeholder p{font-size:.8rem;color:var(--g6)}
+
+/* ---- Sag: Test Adimlari ---- */
+.right-panel{
+  width:45%;height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--g1);
+}
+.test-header{
+  padding:14px 20px;border-bottom:1px solid var(--g3);background:var(--g1);
   display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
 }
-.top-header-left{display:flex;align-items:center;gap:12px}
-.top-header h2{font-size:.85rem;color:var(--text2);font-weight:600;letter-spacing:1px}
-.device-badge{
-  padding:2px 10px;border-radius:10px;font-size:.7rem;font-weight:600;
-  background:var(--cyan-bg);color:var(--cyan);
+.yaml-info{display:flex;flex-direction:column;gap:2px}
+.yaml-name{font-size:.82rem;font-weight:600;color:var(--white)}
+.yaml-meta{font-size:.68rem;color:var(--g6)}
+.status-badge{
+  padding:5px 14px;border-radius:100px;font-size:.68rem;font-weight:600;
+  letter-spacing:.3px;text-transform:uppercase;
 }
-.yaml-title{font-size:.85rem;font-weight:700;color:var(--cyan)}
-.run-status{
-  padding:3px 10px;border-radius:10px;font-size:.7rem;font-weight:700;
+.status-badge.idle{background:var(--g3);color:var(--g6)}
+.status-badge.running{background:var(--white);color:var(--black);animation:pulse 2s ease-in-out infinite}
+.status-badge.done{background:var(--g3);color:var(--white)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+
+/* Step listesi */
+.steps-scroll{flex:1;overflow-y:auto;padding:6px 0}
+
+.step{
+  display:flex;align-items:stretch;gap:0;
+  margin:0 12px;border-radius:var(--radius);
+  transition:all .15s ease;position:relative;
 }
-.run-status.idle{background:var(--bg3);color:var(--text3)}
-.run-status.running{background:var(--yellow-bg);color:var(--yellow);animation:pulse 1.5s infinite}
-.run-status.done{background:var(--green-bg);color:var(--green)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.step+.step{margin-top:2px}
+.step:hover{background:var(--g2)}
 
-.steps-list{
-  flex:1;overflow-y:auto;padding:8px 0;
+/* Sol: Timeline cizgisi */
+.step-timeline{
+  width:36px;display:flex;flex-direction:column;align-items:center;
+  padding-top:14px;flex-shrink:0;position:relative;
 }
-
-.step-row{
-  display:flex;align-items:flex-start;gap:10px;
-  padding:10px 20px;border-bottom:1px solid rgba(48,54,61,.5);
-  transition:background .2s;border-left:3px solid transparent;
+.step-dot{
+  width:10px;height:10px;border-radius:50%;
+  background:var(--g4);border:2px solid var(--g3);
+  position:relative;z-index:1;flex-shrink:0;
+  transition:all .2s;
 }
-.step-row:hover{background:var(--bg2)}
-.step-row.active{background:rgba(210,153,34,.08);border-left-color:var(--yellow)}
-.step-row.passed-row{opacity:.7}
-.step-row.failed-row{background:var(--red-bg);border-left-color:var(--red)}
-.step-row.manual-row{background:rgba(188,140,255,.06);border-left-color:var(--purple)}
-
-.step-num{
-  width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:.75rem;font-weight:700;flex-shrink:0;margin-top:1px;
+.step.is-passed .step-dot{background:var(--white);border-color:var(--white)}
+.step.is-failed .step-dot{background:var(--white);border-color:var(--g6)}
+.step.is-running .step-dot{
+  background:var(--white);border-color:var(--white);
+  box-shadow:0 0 0 4px rgba(255,255,255,.15);
+  animation:dot-pulse 1.5s ease-in-out infinite;
 }
-.step-num.pending{background:var(--bg3);color:var(--text3)}
-.step-num.running{background:var(--yellow-bg);color:var(--yellow)}
-.step-num.passed{background:var(--green-bg);color:var(--green)}
-.step-num.failed{background:var(--red-bg);color:var(--red)}
-.step-num.manual{background:rgba(188,140,255,.15);color:var(--purple)}
+.step.is-manual .step-dot{background:var(--g6);border-color:var(--g6)}
+@keyframes dot-pulse{0%,100%{box-shadow:0 0 0 4px rgba(255,255,255,.15)}50%{box-shadow:0 0 0 8px rgba(255,255,255,.05)}}
 
-.step-content{flex:1;min-width:0}
-.step-action{font-size:.85rem;font-weight:600}
-.keyword{color:var(--cyan)}
-.target-text{color:var(--green)}
-.value-text{color:var(--orange)}
-.step-detail{font-size:.75rem;color:var(--text3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.step-error{font-size:.75rem;color:var(--red);margin-top:2px}
-.step-error.manual-err{color:var(--purple)}
+.step-line{
+  width:1px;flex:1;background:var(--g3);margin-top:4px;
+}
+.step:last-child .step-line{background:transparent}
+.step.is-passed .step-line{background:var(--g5)}
 
-.step-status{width:22px;flex-shrink:0;text-align:center;font-size:.9rem;margin-top:2px}
+/* Orta: Icerik */
+.step-body{
+  flex:1;min-width:0;padding:10px 8px 10px 0;
+}
+.step-action-line{
+  font-size:.78rem;font-weight:500;color:var(--g9);
+  display:flex;align-items:baseline;gap:6px;
+}
+.act-keyword{color:var(--white);font-weight:600}
+.act-target{color:var(--g7)}
+.act-value{color:var(--g6);font-style:italic}
+.step-desc{font-size:.7rem;color:var(--g5);margin-top:2px}
+.step-err{font-size:.7rem;color:var(--g8);margin-top:3px;font-style:italic}
 
+/* Sag: Durum */
+.step-indicator{
+  width:32px;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;padding-top:8px;
+}
+.check-icon{font-size:.75rem;color:var(--g5)}
+.step.is-passed .check-icon{color:var(--white)}
+.step.is-failed .check-icon{color:var(--g7)}
+.step.is-running .check-icon .spinner{
+  display:inline-block;width:12px;height:12px;
+  border:1.5px solid var(--g4);border-top-color:var(--white);
+  border-radius:50%;animation:spin .7s linear infinite;
+}
 @keyframes spin{to{transform:rotate(360deg)}}
-.spinner-icon{
-  display:inline-block;width:14px;height:14px;
-  border:2px solid var(--bg3);border-top-color:var(--yellow);
-  border-radius:50%;animation:spin .8s linear infinite;
-}
 
+/* Aktif step vurgusu */
+.step.is-running{background:var(--active-bg)}
+.step.is-failed{background:rgba(255,255,255,.02)}
+
+/* ---- Alt Bar ---- */
 .bottom-bar{
-  padding:10px 20px;border-top:1px solid var(--border);background:var(--bg2);
+  padding:12px 20px;border-top:1px solid var(--g3);background:var(--g1);
   flex-shrink:0;
 }
-.progress-wrap{
-  height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-bottom:8px;
+.progress-track{
+  height:3px;background:var(--g3);border-radius:2px;overflow:hidden;margin-bottom:10px;
 }
-.progress-fill{
-  height:100%;border-radius:3px;transition:width .3s ease;
-  background:linear-gradient(90deg,var(--cyan),var(--green));
+.progress-bar{
+  height:100%;border-radius:2px;transition:width .4s ease;
+  background:var(--white);
 }
-.progress-fill.has-fail{
-  background:linear-gradient(90deg,var(--cyan),var(--red));
-}
-.stats-row{
+.progress-bar.has-fail{background:var(--g6)}
+.stats{
   display:flex;align-items:center;justify-content:space-between;
-  font-size:.75rem;color:var(--text2);
+  font-size:.7rem;color:var(--g6);
 }
-.stat{display:flex;align-items:center;gap:4px}
-.stat .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot.green-dot{background:var(--green)}.dot.red-dot{background:var(--red)}
-.dot.yellow-dot{background:var(--yellow)}.dot.purple-dot{background:var(--purple)}
+.stat-group{display:flex;gap:16px}
+.stat-item{display:flex;align-items:center;gap:5px}
+.stat-dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.stat-dot.s-pass{background:var(--white)}
+.stat-dot.s-fail{background:var(--g6)}
+.stat-dot.s-manual{background:var(--g5)}
+.stat-dot.s-pending{background:var(--g4)}
+.stat-val{font-weight:600;color:var(--g8)}
+.elapsed{color:var(--g6);font-variant-numeric:tabular-nums}
 
-::-webkit-scrollbar{width:6px}
-::-webkit-scrollbar-track{background:var(--bg)}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--text3)}
+/* Scrollbar */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--g4);border-radius:2px}
+::-webkit-scrollbar-thumb:hover{background:var(--g5)}
+
+@media(max-width:900px){
+  .layout{flex-direction:column}
+  .left-panel{width:100%;height:45%}
+  .right-panel{width:100%;height:55%}
+}
 </style>
 </head>
 <body>
-<div class="main-panel">
-  <div class="top-header">
-    <div class="top-header-left">
-      <h2>NAZAR LIVE TEST</h2>
-      <span class="device-badge" id="deviceBadge">Cihaz algilaniyor...</span>
-      <span class="yaml-title" id="yamlTitle">test.yaml</span>
-    </div>
-    <span class="run-status idle" id="runStatus">Bekliyor</span>
-  </div>
-  <div class="steps-list" id="stepsList"></div>
-  <div class="bottom-bar">
-    <div class="progress-wrap">
-      <div class="progress-fill" id="progressFill" style="width:0%"></div>
-    </div>
-    <div class="stats-row">
-      <div style="display:flex;gap:12px">
-        <span class="stat"><span class="dot green-dot"></span> <span id="passedCount">0</span> gecti</span>
-        <span class="stat"><span class="dot red-dot"></span> <span id="failedCount">0</span> kaldi</span>
-        <span class="stat"><span class="dot purple-dot"></span> <span id="manualCount">0</span> manuel</span>
-        <span class="stat"><span class="dot yellow-dot"></span> <span id="pendingCount">0</span> bekliyor</span>
+<div class="layout">
+
+  <!-- Sol: Simulator -->
+  <div class="left-panel">
+    <div class="panel-header">
+      <div class="brand">
+        <div class="brand-mark">N</div>
+        <span class="brand-text">Nazar Studio</span>
       </div>
-      <span id="elapsed" style="color:#8b949e">0.0s</span>
+      <span class="device-chip" id="deviceBadge">Algilaniyor...</span>
+    </div>
+    <div class="screen-area" id="screenWrap">
+      <img id="screenImg" src="/stream" alt="Screen"
+           onload="this.classList.add('is-loaded')"
+           onerror="this.classList.remove('is-loaded')">
+      <div class="placeholder" id="noScreen">
+        <div class="placeholder-icon">
+          <svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01" stroke-linecap="round"/></svg>
+        </div>
+        <p>Simulator bekleniyor...</p>
+      </div>
     </div>
   </div>
+
+  <!-- Sag: Test Adimlari -->
+  <div class="right-panel">
+    <div class="test-header">
+      <div class="yaml-info">
+        <span class="yaml-name" id="yamlTitle">test.yaml</span>
+        <span class="yaml-meta" id="yamlMeta">0 adim</span>
+      </div>
+      <span class="status-badge idle" id="runStatus">Bekliyor</span>
+    </div>
+
+    <div class="steps-scroll" id="stepsList"></div>
+
+    <div class="bottom-bar">
+      <div class="progress-track">
+        <div class="progress-bar" id="progressFill" style="width:0%"></div>
+      </div>
+      <div class="stats">
+        <div class="stat-group">
+          <span class="stat-item"><span class="stat-dot s-pass"></span><span class="stat-val" id="passedCount">0</span> gecti</span>
+          <span class="stat-item"><span class="stat-dot s-fail"></span><span class="stat-val" id="failedCount">0</span> kaldi</span>
+          <span class="stat-item"><span class="stat-dot s-manual"></span><span class="stat-val" id="manualCount">0</span> manuel</span>
+          <span class="stat-item"><span class="stat-dot s-pending"></span><span class="stat-val" id="pendingCount">0</span> bekliyor</span>
+        </div>
+        <span class="elapsed" id="elapsed">0.0s</span>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -752,134 +1062,122 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
   var stepsList = document.getElementById('stepsList');
   var progressFill = document.getElementById('progressFill');
   var yamlTitle = document.getElementById('yamlTitle');
+  var yamlMeta = document.getElementById('yamlMeta');
   var runStatus = document.getElementById('runStatus');
   var deviceBadge = document.getElementById('deviceBadge');
 
-  var statusLabels = {
-    idle: 'Bekliyor',
-    running: 'Calisiyor...',
-    done: 'Tamamlandi'
-  };
+  var statusLabels = {idle:'Bekliyor', running:'Calisiyor', done:'Tamamlandi'};
 
-  function createStatusIcon(status) {
-    if (status === 'running') {
-      var sp = document.createElement('span');
-      sp.className = 'spinner-icon';
-      return sp;
-    }
-    var el = document.createElement('span');
-    if (status === 'passed') {
-      el.style.color = 'var(--green)';
-      el.textContent = '\u2713';
-    } else if (status === 'failed') {
-      el.style.color = 'var(--red)';
-      el.textContent = '\u2717';
-    } else if (status === 'manual') {
-      el.style.color = 'var(--purple)';
-      el.textContent = '\u2699';
-    } else {
-      el.style.color = 'var(--text3)';
-      el.textContent = '\u2014';
-    }
-    return el;
-  }
-
-  function buildStepRow(step, index) {
+  function buildStep(step, index, total) {
     var st = step.status || 'pending';
-    var row = document.createElement('div');
-    row.className = 'step-row';
-    if (st === 'running') row.className += ' active';
-    else if (st === 'passed') row.className += ' passed-row';
-    else if (st === 'failed') row.className += ' failed-row';
-    else if (st === 'manual') row.className += ' manual-row';
 
-    var numEl = document.createElement('div');
-    numEl.className = 'step-num ' + st;
-    numEl.textContent = String(index + 1);
-    row.appendChild(numEl);
+    var el = document.createElement('div');
+    el.className = 'step';
+    if (st === 'running') el.className += ' is-running';
+    else if (st === 'passed') el.className += ' is-passed';
+    else if (st === 'failed') el.className += ' is-failed';
+    else if (st === 'manual') el.className += ' is-manual';
 
-    var content = document.createElement('div');
-    content.className = 'step-content';
+    // Timeline
+    var tl = document.createElement('div');
+    tl.className = 'step-timeline';
+    var dot = document.createElement('div');
+    dot.className = 'step-dot';
+    tl.appendChild(dot);
+    if (index < total - 1) {
+      var line = document.createElement('div');
+      line.className = 'step-line';
+      tl.appendChild(line);
+    }
+    el.appendChild(tl);
 
-    var actionDiv = document.createElement('div');
-    actionDiv.className = 'step-action';
+    // Body
+    var body = document.createElement('div');
+    body.className = 'step-body';
+
+    var actLine = document.createElement('div');
+    actLine.className = 'step-action-line';
 
     var kw = document.createElement('span');
-    kw.className = 'keyword';
+    kw.className = 'act-keyword';
     kw.textContent = step.action || '';
-    actionDiv.appendChild(kw);
+    actLine.appendChild(kw);
 
     if (step.target) {
       var tg = document.createElement('span');
-      tg.className = 'target-text';
-      tg.textContent = ' "' + step.target + '"';
-      actionDiv.appendChild(tg);
+      tg.className = 'act-target';
+      tg.textContent = '"' + step.target + '"';
+      actLine.appendChild(tg);
     }
     if (step.value) {
       var vl = document.createElement('span');
-      vl.className = 'value-text';
-      vl.textContent = ' [' + step.value + ']';
-      actionDiv.appendChild(vl);
+      vl.className = 'act-value';
+      vl.textContent = step.value;
+      actLine.appendChild(vl);
     }
-    content.appendChild(actionDiv);
+    body.appendChild(actLine);
 
     if (step.description) {
       var desc = document.createElement('div');
-      desc.className = 'step-detail';
+      desc.className = 'step-desc';
       desc.textContent = step.description;
-      content.appendChild(desc);
+      body.appendChild(desc);
     }
-
     if (step.error && st === 'failed') {
       var err = document.createElement('div');
-      err.className = 'step-error';
+      err.className = 'step-err';
       err.textContent = step.error;
-      content.appendChild(err);
+      body.appendChild(err);
     }
     if (st === 'manual') {
-      var manualMsg = document.createElement('div');
-      manualMsg.className = 'step-error manual-err';
-      manualMsg.textContent = 'Manuel dogrulama gerekli';
-      content.appendChild(manualMsg);
+      var m = document.createElement('div');
+      m.className = 'step-err';
+      m.textContent = 'Manuel dogrulama gerekli';
+      body.appendChild(m);
     }
+    el.appendChild(body);
 
-    row.appendChild(content);
+    // Indicator
+    var ind = document.createElement('div');
+    ind.className = 'step-indicator';
+    var icon = document.createElement('span');
+    icon.className = 'check-icon';
+    if (st === 'running') {
+      icon.innerHTML = '<span class="spinner"></span>';
+    } else if (st === 'passed') {
+      icon.textContent = '\u2713';
+    } else if (st === 'failed') {
+      icon.textContent = '\u2717';
+    } else if (st === 'manual') {
+      icon.textContent = '\u25CB';
+    } else {
+      icon.textContent = '';
+    }
+    ind.appendChild(icon);
+    el.appendChild(ind);
 
-    var statusCell = document.createElement('div');
-    statusCell.className = 'step-status';
-    statusCell.appendChild(createStatusIcon(st));
-    row.appendChild(statusCell);
-
-    return row;
+    return el;
   }
 
   function renderSteps(data) {
     if (!data || !data.steps) return;
 
     yamlTitle.textContent = data.yaml_name || 'test.yaml';
-
-    if (data.device) {
-      deviceBadge.textContent = data.device;
-    }
+    yamlMeta.textContent = data.steps.length + ' adim';
 
     var overall = data.overall_status || 'idle';
     runStatus.textContent = statusLabels[overall] || overall;
-    runStatus.className = 'run-status ' + overall;
+    runStatus.className = 'status-badge ' + overall;
 
-    var fragment = document.createDocumentFragment();
+    var frag = document.createDocumentFragment();
     for (var i = 0; i < data.steps.length; i++) {
-      fragment.appendChild(buildStepRow(data.steps[i], i));
+      frag.appendChild(buildStep(data.steps[i], i, data.steps.length));
     }
+    while (stepsList.firstChild) stepsList.removeChild(stepsList.firstChild);
+    stepsList.appendChild(frag);
 
-    while (stepsList.firstChild) {
-      stepsList.removeChild(stepsList.firstChild);
-    }
-    stepsList.appendChild(fragment);
-
-    var active = stepsList.querySelector('.active');
-    if (active) {
-      active.scrollIntoView({behavior: 'smooth', block: 'center'});
-    }
+    var active = stepsList.querySelector('.is-running');
+    if (active) active.scrollIntoView({behavior:'smooth', block:'center'});
 
     document.getElementById('passedCount').textContent = data.passed || 0;
     document.getElementById('failedCount').textContent = data.failed || 0;
@@ -889,11 +1187,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 
     var pct = data.progress || 0;
     progressFill.style.width = pct + '%';
-    if (data.failed > 0) {
-      progressFill.className = 'progress-fill has-fail';
-    } else {
-      progressFill.className = 'progress-fill';
-    }
+    progressFill.className = (data.failed > 0) ? 'progress-bar has-fail' : 'progress-bar';
+
+    if (data.device) deviceBadge.textContent = data.device;
   }
 
   function refreshSteps() {
@@ -916,7 +1212,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Mono',Consolas,'Liberation
 # ============================================================
 
 class _TestUIHandler(BaseHTTPRequestHandler):
-    """Live Test UI HTTP istek isleyici."""
+    """Live Test UI HTTP istek isleyici.
+
+    MJPEG stream destekli. /stream endpoint'i multipart/x-mixed-replace
+    ile binary JPEG frame'leri gonderir. BrokenPipe ve ConnectionReset
+    hatalari sessizce yakalanir.
+    """
 
     def log_message(self, format, *args):
         """Konsol ciktisini bastir."""
@@ -939,10 +1240,50 @@ class _TestUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _stream_mjpeg(self):
+        """MJPEG stream: multipart/x-mixed-replace ile binary JPEG gonder."""
+        ui: NazarLiveTestUI = self.server._nazar_test_ui
+        cap = ui.screenshot
+        if cap is None:
+            self._send_json({"error": "screenshot not ready"}, 503)
+            return
+
+        boundary = b"--frame"
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         "multipart/x-mixed-replace; boundary=--frame")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        try:
+            while cap._running:
+                # Frame bekle (event-driven, polling degil)
+                cap.wait_frame(timeout=2.0)
+                frame = cap.get_jpeg()
+                if not frame:
+                    continue
+                # MJPEG part header + binary JPEG
+                header = (
+                    boundary + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(frame)).encode() + b"\r\n"
+                    b"\r\n"
+                )
+                self.wfile.write(header)
+                self.wfile.write(frame)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def do_GET(self):
         ui: NazarLiveTestUI = self.server._nazar_test_ui
 
-        if self.path == "/api/steps":
+        if self.path == "/stream":
+            self._stream_mjpeg()
+
+        elif self.path == "/api/steps":
             data = ui.tracker.get_data() if ui.tracker else {}
             data["device"] = ui.device_name
             self._send_json(data)
@@ -977,13 +1318,14 @@ class NazarLiveTestUI:
         self.port = port
         self.platform = "none"
         self.device_name = "Cihaz algilaniyor..."
+        self.screenshot: Optional[ScreenshotCapture] = None
         self.tracker: Optional[StepTracker] = None
         self.runner: Optional[NazarTestRunner] = None
         self._server: Optional[HTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
 
     def start(self, yaml_file: str, auto_run: bool = True) -> bool:
-        """Sunucuyu baslat ve testleri calistir.
+        """Sunucuyu baslat, ekran yakalamayi etkinlestir ve testleri calistir.
 
         Args:
             yaml_file: YAML test dosyasinin yolu.
@@ -998,6 +1340,10 @@ class NazarLiveTestUI:
             return False
 
         self.device_name = get_device_name(self.platform)
+
+        # Screenshot yakalayici baslat
+        self.screenshot = ScreenshotCapture(self.platform)
+        self.screenshot.start()
 
         # Tracker olustur
         self.tracker = StepTracker()
@@ -1033,12 +1379,19 @@ class NazarLiveTestUI:
         return True
 
     def start_server_only(self) -> bool:
-        """Sadece sunucu baslat (test olmadan)."""
+        """Sadece sunucu + screenshot baslat (test olmadan).
+
+        Simulator izleme modu - YAML dosyasi gerekmez.
+        """
         self.platform = detect_platform()
         if self.platform == "none":
             return False
 
         self.device_name = get_device_name(self.platform)
+
+        self.screenshot = ScreenshotCapture(self.platform)
+        self.screenshot.start()
+
         self.tracker = StepTracker()
 
         try:
@@ -1058,6 +1411,10 @@ class NazarLiveTestUI:
         if self.runner:
             self.runner.stop()
             self.runner = None
+
+        if self.screenshot:
+            self.screenshot.stop()
+            self.screenshot = None
 
         if self._server:
             self._server.shutdown()
